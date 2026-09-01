@@ -86,12 +86,16 @@ MODEL_WEIGHTS = Path(os.environ.get("MODEL_WEIGHTS", "model/lcquad_finetuned.saf
 if not MODEL_WEIGHTS.is_absolute():
     MODEL_WEIGHTS = Path(__file__).parent / MODEL_WEIGHTS
 
+# GPU when one is available (e.g. Colab), CPU otherwise
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 config = AutoConfig.from_pretrained(MODEL_ID)
 model = AutoModelForSeq2SeqLM.from_config(config)
 model.load_state_dict(load_file(MODEL_WEIGHTS), strict=False)
 model.eval()
+model.to(DEVICE)
 
-print(f"loaded {MODEL_WEIGHTS.name}")
+print(f"loaded {MODEL_WEIGHTS.name} on {DEVICE}")
 
 # compiled against the tokenizer, so each grammar can later produce a
 # next-token mask, not just accept/reject a finished string
@@ -259,7 +263,7 @@ def generate(question):
     ontological encouragement for relations after an entity subject and for
     objects inside the relation's range -- which runs until the produced
     text closes the query with '}'."""
-    input_ids = tokenizer(question, return_tensors="pt").input_ids
+    input_ids = tokenizer(question, return_tensors="pt").input_ids.to(DEVICE)
 
     ids = [config.decoder_start_token_id]  # decoder input; grows across phases
     query_so_far = ""                      # query text; grows across phases
@@ -270,7 +274,7 @@ def generate(question):
     while not matcher.is_terminated():
         matcher.fill_next_token_bitmask(bitmask)
         logits = model(input_ids=input_ids,
-                       decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                       decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
         xgr.apply_token_bitmask_inplace(logits, bitmask)
         next_id = int(logits.argmax())
         matcher.accept_token(next_id)
@@ -309,7 +313,7 @@ def generate(question):
                 prime_text = "<"
             else:
                 logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
                 mask = torch.full_like(logits, float("-inf"))
                 mask[0, [GL_LT_ID, GL_QM_ID]] = 0.0
                 next_id = int((logits + mask).argmax())
@@ -324,7 +328,7 @@ def generate(question):
                     # opens the coming relation slot as the stop signal
                     allowed.append(GL_LT_ID)
                 logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
                 mask = torch.full_like(logits, float("-inf"))
                 mask[0, allowed] = 0.0
                 next_id = int((logits + mask).argmax())
@@ -360,7 +364,7 @@ def generate(question):
             while not rm.is_terminated():
                 rm.fill_next_token_bitmask(bitmask)
                 logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
                 xgr.apply_token_bitmask_inplace(logits, bitmask)
                 if boost_node:
                     logits[0, list(boost_node)] += RELATION_BOOST
@@ -391,7 +395,7 @@ def generate(question):
                     # ' }' closes the query
                     allowed += [GL_DOT_ID, GL_RBRACE_ID]
                 logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
                 mask = torch.full_like(logits, float("-inf"))
                 mask[0, allowed] = 0.0
                 if boost_nodes:
