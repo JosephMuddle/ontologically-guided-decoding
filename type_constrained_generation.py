@@ -45,6 +45,15 @@ subject's classes are found by walking every class trie over the entity's
 tokens, relations whose effective domains those classes cover form a small
 encouragement trie, and tokens continuing one of them get RELATION_BOOST
 added to their logits.
+
+Step 7: the object slot (idx 2) and triple chaining. The object is any
+entity or variable from the merged trie; entities inside the relation's
+effective range are encouraged via OBJECT_BOOST. The class tries are
+partitioned by most-specific direct type (extract_entities.py assigns only
+the direct type to class_entities.json), so a superclass trie does NOT
+contain its subclasses: the range boost walks the range class's trie and
+every subclass trie in parallel. The slot ends with the model choosing ' .'
+(chain another triple, back to idx 0) or ' }' (close the query).
 """
 import json
 import os
@@ -137,8 +146,12 @@ print(f"compiled grammars: 5 beginning templates, {len(RELATIONS)} relations + t
 # the parser walked them: a ~1.5M-literal entity alternation cannot be
 # compiled by xgrammar, but a trie is walked in O(tokens)
 TRIE_END = None  # terminal marker key inside a trie node (must match the pkl)
-LT_ID = tokenizer("<", add_special_tokens=False).input_ids[0]      # bare '<'
-GL_LT_ID = tokenizer(" <", add_special_tokens=False).input_ids[0]  # glued ' <'
+LT_ID = tokenizer("<", add_special_tokens=False).input_ids[0]        # bare '<'
+GL_LT_ID = tokenizer(" <", add_special_tokens=False).input_ids[0]    # glued ' <'
+QM_ID = tokenizer("?", add_special_tokens=False).input_ids[0]        # bare '?'
+GL_QM_ID = tokenizer(" ?", add_special_tokens=False).input_ids[0]    # glued ' ?'
+GL_DOT_ID = tokenizer(" .", add_special_tokens=False).input_ids[0]   # glued ' .'
+GL_RBRACE_ID = tokenizer(" }", add_special_tokens=False).input_ids[0]  # glued ' }'
 
 _start = time.time()
 with open(Path(__file__).parent / "dbpedia" / "class_tries.pkl", "rb") as f:
@@ -154,8 +167,10 @@ print(f"loaded {len(CLASS_TRIES)} class tries in {time.time() - _start:.1f}s")
 # the experimental knob of the soft-constraint variant (0 == pure hard
 # constraint)
 RELATION_BOOST = 5.0
+OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
+EFFECTIVE_PROPERTY_RANGE_MAP = TBOX_RULES["effective_property_range_map"]
 OWL_THING = "<http://www.w3.org/2002/07/owl#Thing>"
 
 # child class -> all its transitive ancestor classes, inverted from the
@@ -221,12 +236,29 @@ def build_boost_trie(relations):
     return root[GL_LT_ID]
 
 
+def range_tries(relation):
+    """The class tries an object of this relation may come from: each
+    effective range class plus all its subclasses. The class tries are
+    partitioned by most-specific direct type, so subclass entities are NOT
+    inside the superclass trie and must be unioned explicitly. owl:Thing
+    ranges are unconstrained and yield no tries (no boost)."""
+    tries = []
+    for cls in EFFECTIVE_PROPERTY_RANGE_MAP[relation]:
+        if cls == OWL_THING:
+            continue
+        for sub in [cls] + TBOX_RULES["class_subsumptions"].get(cls, []):
+            if sub in CLASS_TRIES:
+                tries.append(CLASS_TRIES[sub])
+    return tries
+
+
 def generate(question):
     """Generate a SPARQL query for a natural-language question, one
     grammar-constrained phase at a time. Phase 1: the beginning template.
-    Phase 2: the triples loop (so far: the entity slot and the relation slot,
-    the latter with ontological encouragement when the subject is an entity),
-    which runs until the produced text closes the query with '}'."""
+    Phase 2: the triples loop -- subject, relation and object slots, with
+    ontological encouragement for relations after an entity subject and for
+    objects inside the relation's range -- which runs until the produced
+    text closes the query with '}'."""
     input_ids = tokenizer(question, return_tensors="pt").input_ids
 
     ids = [config.decoder_start_token_id]  # decoder input; grows across phases
@@ -256,27 +288,40 @@ def generate(question):
     if idx == 0:
         query_so_far = query_so_far[:-1]
 
-    # phase 2: the triples. Each iteration produces one slot of the current
-    # triple (entity / relation / object, decided by state) or the separator
-    # / closer between triples. Supports any number of triples: the loop ends
-    # only when the produced text closes the query with '}'
+    # phase 2: the triples. The independent ifs let a whole triple cascade
+    # through a single iteration (subject -> relation -> object). Supports
+    # any number of triples: the loop ends only when the produced text closes
+    # the query with '}'
     while not query_so_far.endswith("}"):
         if state["idx"] == 0:
-            # first entity slot: subject (idx 0) or object (idx 2). Guided by the
-            # merged all-entities trie -- at idx 0 no relation has been chosen
-            # yet, so no domain/range constraint can apply and any entity in
-            # the KB is legal (idx 2 will prime differently once the relation
-            # slot exists; it is unreachable for now). The ent beginning
-            # template already produced the glued ' <' as the last decoder
-            # token, so prime the trie with '<' exactly as trie_match does
-            assert tokenizer.decode([ids[-1]]) == " <"
-            node = ALL_ENTITIES_TRIE[LT_ID]
+            # entity slot: the subject of a triple. Guided by the merged
+            # all-entities trie -- no relation has been chosen yet, so no
+            # domain/range constraint can apply and any entity (or variable)
+            # is legal. Two ways in: an ent beginning template already
+            # produced the glued ' <' (its '<' was stripped from query_so_far
+            # for bookkeeping), forcing an entity; after a ' .' separator
+            # nothing is produced yet, so the model picks the subject kind
+            # itself with the glued token -- ' <' (entity) or ' ?'
+            # (variable). Either way the glued token maps onto the bare trie
+            # prime, exactly as trie_match does
+            if tokenizer.decode([ids[-1]]) == " <":
+                node = ALL_ENTITIES_TRIE[LT_ID]
+                prime_text = "<"
+            else:
+                logits = model(input_ids=input_ids,
+                               decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                mask = torch.full_like(logits, float("-inf"))
+                mask[0, [GL_LT_ID, GL_QM_ID]] = 0.0
+                next_id = int((logits + mask).argmax())
+                ids.append(next_id)
+                node = ALL_ENTITIES_TRIE[LT_ID if next_id == GL_LT_ID else QM_ID]
+                prime_text = tokenizer.decode([next_id])
             ent_ids = []
             while True:
                 allowed = [t for t in node if t is not None]
                 if TRIE_END in node:
-                    # the entity may end here: offer the glued ' <' that opens
-                    # the coming relation slot as the stop signal
+                    # the subject may end here: offer the glued ' <' that
+                    # opens the coming relation slot as the stop signal
                     allowed.append(GL_LT_ID)
                 logits = model(input_ids=input_ids,
                                decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
@@ -285,30 +330,31 @@ def generate(question):
                 next_id = int((logits + mask).argmax())
                 ids.append(next_id)
                 if next_id == GL_LT_ID:
-                    break  # entity complete; the glued token belongs to the relation slot
+                    break  # subject complete; the glued token belongs to the relation slot
                 node = node[next_id]
                 ent_ids.append(next_id)
-            entity_text = "<" + tokenizer.decode(ent_ids)
+            entity_text = prime_text + tokenizer.decode(ent_ids)
             query_so_far += entity_text
-            state["prev"] = entity_text  # last full entity or variable produced
-            state["idx"] = 1             # subject done, a relation comes next
-        elif state["idx"] == 1:
+            state["prev"] = entity_text.strip()  # clean bracketed IRI or variable
+            state["idx"] = 1                     # subject done, a relation comes next
+        if state["idx"] == 1:
             # relation slot. The hard mask is always the full relation
             # grammar: every whitelisted relation stays legal, the model
             # chooses among them, and the type tail can close the query with
             # '}', which ends the triples loop
             rm = xgr.GrammarMatcher(relation_grammar, terminate_without_stop_token=True)
+            prefix = ""
+            if ids[-1] == GL_LT_ID:
+                # the entity slot ended on this slot's glued ' <' (it is the
+                # last decoder token), so prime the matcher with it; its text
+                # goes back in via the prefix
+                rm.accept_token(ids[-1])
+                prefix = " <"
             boost_node = None
             if state["prev"] not in ("?uri", "?x"):
-                # entity subject: the entity slot ended on this slot's glued
-                # ' <' (the last decoder token), so prime the matcher with it
-                # and append its text now. And layer soft ontological
-                # guidance on top of the hard mask: tokens continuing a
-                # relation whose domains the subject's types cover get
-                # RELATION_BOOST added to their logits
-                assert ids[-1] == GL_LT_ID
-                rm.accept_token(ids[-1])
-                query_so_far += " <"
+                # entity subject: layer soft ontological guidance on top of
+                # the hard mask -- tokens continuing a relation whose domains
+                # the subject's types cover get RELATION_BOOST
                 boost_node = build_boost_trie(encouraged_relations(entity_types(state["prev"])))
             rel_ids = []
             while not rm.is_terminated():
@@ -323,10 +369,45 @@ def generate(question):
                 ids.append(next_id)
                 rel_ids.append(next_id)
                 boost_node = boost_node.get(next_id) if boost_node else None
-            query_so_far += tokenizer.decode(rel_ids)
+            rel_text = prefix + tokenizer.decode(rel_ids)
+            query_so_far += rel_text
             if not query_so_far.endswith("}"):
-                state["idx"] = 2  # a plain relation was produced; the object comes next
-        break  # TEMPORARY: object/separator slots not implemented yet
+                state["idx"] = 2
+                state["prev"] = rel_text.strip()  # the bracketed relation IRI
+        if state["idx"] == 2:
+            # object slot: any entity or variable is legal, so the merged
+            # all-entities trie is walked from the root (the relation ended
+            # on a standalone space token, so the object starts with a bare
+            # '<' or '?'). Entities inside the relation's effective range are
+            # encouraged: their class tries are walked in parallel and tokens
+            # continuing one of them get OBJECT_BOOST
+            node = ALL_ENTITIES_TRIE
+            boost_nodes = range_tries(state["prev"])
+            ent_ids = []
+            while True:
+                allowed = [t for t in node if t is not None]
+                if TRIE_END in node:
+                    # the object may end here: ' .' chains another triple,
+                    # ' }' closes the query
+                    allowed += [GL_DOT_ID, GL_RBRACE_ID]
+                logits = model(input_ids=input_ids,
+                               decoder_input_ids=torch.tensor([ids])).logits[:, -1, :]
+                mask = torch.full_like(logits, float("-inf"))
+                mask[0, allowed] = 0.0
+                if boost_nodes:
+                    boosted = {t for bn in boost_nodes for t in bn if t is not None}
+                    logits[0, list(boosted)] += OBJECT_BOOST
+                next_id = int((logits + mask).argmax())
+                ids.append(next_id)
+                if next_id in (GL_DOT_ID, GL_RBRACE_ID):
+                    break  # object complete; this token is the separator/closer
+                node = node[next_id]
+                boost_nodes = [bn[next_id] for bn in boost_nodes if next_id in bn]
+                ent_ids.append(next_id)
+            query_so_far += tokenizer.decode(ent_ids) + tokenizer.decode([next_id])
+            state["prev"] = tokenizer.decode(ent_ids)  # last entity/variable produced
+            if next_id == GL_DOT_ID:
+                state["idx"] = 0  # ' .' -- the next triple's subject comes next
 
     return query_so_far
 
