@@ -275,7 +275,7 @@ def generate(question):
         matcher.fill_next_token_bitmask(bitmask)
         logits = model(input_ids=input_ids,
                        decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
-        xgr.apply_token_bitmask_inplace(logits, bitmask)
+        xgr.apply_token_bitmask_inplace(logits, bitmask.to(DEVICE))
         next_id = int(logits.argmax())
         matcher.accept_token(next_id)
         ids.append(next_id)
@@ -365,7 +365,7 @@ def generate(question):
                 rm.fill_next_token_bitmask(bitmask)
                 logits = model(input_ids=input_ids,
                                decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
-                xgr.apply_token_bitmask_inplace(logits, bitmask)
+                xgr.apply_token_bitmask_inplace(logits, bitmask.to(DEVICE))
                 if boost_node:
                     logits[0, list(boost_node)] += RELATION_BOOST
                 next_id = int(logits.argmax())
