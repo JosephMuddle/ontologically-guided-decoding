@@ -17,25 +17,49 @@ Classes and relations are stored using an XGrammar object. This is due to simpli
 
 # Clean repo run order
 
-Prerequisites:
-- `tbox_reasoner/dbpedia_2016-04.owl`
-- `predicates.txt`
-- `dbpedia/instance_types_en.ttl.bz2`
-- `dbpedia/instance_types_transitive_en.ttl.bz2`
-- `lcquad_data/train-data.json`
-- `.env` containing `DATA_PATH=dbpedia`
+Everything needed for the constrained-decoding pipeline. (The SPARQL-endpoint
+execution evaluation is a separate, optional side project and is not covered
+here.)
+
+Prerequisites already in the repo:
+- `tbox_reasoner/dbpedia_2016-04.owl` -- DBpedia 2016-04 ontology
+- `lcquad_data/predicates.txt` -- LC-QuAD predicate whitelist
+- `lcquad_data/train-data.json` / `lcquad_data/test-data.json` -- LC-QuAD v1 splits
+
+Prerequisites to fetch:
+- The two instance-type dumps, placed in `dbpedia/`:
+  [instance_types_en.ttl.bz2](https://downloads.dbpedia.org/2016-04/core-i18n/en/instance_types_en.ttl.bz2)
+  and [instance_types_transitive_en.ttl.bz2](https://downloads.dbpedia.org/2016-04/core-i18n/en/instance_types_transitive_en.ttl.bz2)
+- The fine-tuned weights, placed at `model/lcquad_finetuned.safetensors`:
+  [Google Drive](https://drive.google.com/file/d/1T6EA00eQYec3cLeVGyjPMLV897jpGOnj/view?usp=sharing).
+  To train your own instead, run `lcquad_finetune_colab.ipynb` on Colab.
+- A `.env` file in the project root:
+  ```
+  DATA_PATH=dbpedia
+  MODEL_WEIGHTS=model/lcquad_finetuned.safetensors
+  ```
+  (`MODEL_WEIGHTS` is optional; the path above is the default.)
+
+Python deps: `pip install torch transformers xgrammar safetensors rdflib python-dotenv`
 
 Run the pipeline in this order:
 
 1. `python tbox_reasoner/surface_reasoning.py`
-   - Reads the OWL T-box and `predicates.txt`.
-   - Writes `tbox_reasoner/tbox_rules.json`.
+   - Reads the OWL T-box and `lcquad_data/predicates.txt`.
+   - Writes `tbox_reasoner/tbox_rules.json` (already committed; rerun only if the ontology or the whitelist changes).
 
 2. `python preprocessing/extract_entities.py`
-   - Reads the two `instance_types*.ttl.bz2` dumps.
+   - Reads the two `instance_types*.ttl.bz2` dumps from `DATA_PATH`.
    - Writes `dbpedia/entities.pkl` and `dbpedia/class_entities.json`.
 
 3. `python preprocessing/build_class_tries.py`
    - Reads `dbpedia/class_entities.json` and `tbox_reasoner/tbox_rules.json`.
    - Writes `dbpedia/class_tries.pkl`.
    - Rebuild this whenever the tokenizer/model changes; it currently uses `facebook/bart-large`.
+
+4. `python type_constrained_generation.py`
+   - Loads the weights, t-box rules, and class tries, then generates a query for one built-in question as a smoke test.
+
+5. `python test.py`
+   - Generates queries for all 1000 LC-QuAD test questions.
+   - Writes `output.json` (rewritten every 10 questions) and prints exact-match and modulo-namespace-twins accuracy.
