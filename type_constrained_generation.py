@@ -182,7 +182,7 @@ OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 # width of the slot-local beam search over entity spellings (beam_spell);
 # 1 reproduces greedy picking exactly. SPARKLE used ~7 over the whole query;
 # here it is a per-slot knob to tune
-BEAM_WIDTH = 4
+BEAM_WIDTH = 7
 
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
 EFFECTIVE_PROPERTY_RANGE_MAP = TBOX_RULES["effective_property_range_map"]
