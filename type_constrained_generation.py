@@ -214,7 +214,7 @@ OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 # width of the slot-local beam search over entity spellings (beam_spell);
 # 1 reproduces greedy picking exactly. SPARKLE used ~7 over the whole query;
 # here it is a per-slot knob to tune
-BEAM_WIDTH = 7
+BEAM_WIDTH = 4
 
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
 EFFECTIVE_PROPERTY_RANGE_MAP = TBOX_RULES["effective_property_range_map"]
@@ -366,6 +366,27 @@ def beam_spell(ids, node, stop_tokens, boost_nodes=()):
         candidates.sort(key=lambda b: b.mean_logprob(), reverse=True)
         beams = candidates[:BEAM_WIDTH]
     return beams[0].tokens[:-1], beams[0].stop_id
+
+
+@torch.no_grad()
+def generate_unconstrained(question, max_new_tokens=160):
+    """The same prompt decoded greedily with no grammar, no tries and no
+    ontological boosts -- whatever the fine-tuned weights produce on their own.
+
+    This is the baseline the constrained decoder is measured against, so it
+    shares generate()'s prompt exactly; only the decoding differs. Generation
+    stops at EOS, which the fine-tune appends to every training target."""
+    prompt = f"Question: {question}\nSPARQL:\n"
+    enc = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(DEVICE)
+    out = model.generate(
+        **enc,
+        max_new_tokens=max_new_tokens,
+        do_sample=False,
+        num_beams=BEAM_WIDTH,
+        pad_token_id=tokenizer.eos_token_id,
+        eos_token_id=tokenizer.eos_token_id,
+    )
+    return tokenizer.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
 
 
 def generate(question):

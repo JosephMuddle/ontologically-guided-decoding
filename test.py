@@ -5,16 +5,18 @@ generator, canonicalize both the produced query and the gold query, and count
 exact string matches. Two metrics are reported: strict exact match, and match
 "modulo namespace twins", where predicates whitelisted in both the ontology/
 and property/ namespaces (e.g. architect) are compared namespace-neutrally.
-Every (question, generated, gold, match, ...) record is written to
-output.json -- rewritten every CHECKPOINT questions so a crash does not lose
-the run.
+Each question is also decoded unconstrained -- straight greedy generation from
+the fine-tuned weights, no grammar or tries -- so output.json carries the
+constrained query, the gold query and the unconstrained baseline side by side,
+each in both raw and canonical form. Every record is written to output.json,
+rewritten every CHECKPOINT questions so a crash does not lose the run.
 """
 import json
 import re
 import time
 from pathlib import Path
 
-from type_constrained_generation import generate
+from type_constrained_generation import generate, generate_unconstrained
 
 DATA_FILE = Path(__file__).parent / "lcquad_data" / "test-data.json"
 WHITELIST_FILE = Path(__file__).parent / "lcquad_data" / "predicates.txt"
@@ -66,6 +68,7 @@ def main():
     results = []
     matches = 0
     twin_matches = 0
+    free_matches = 0
     start = time.perf_counter()
     for i, item in enumerate(data, 1):
         question = item["corrected_question"]
@@ -73,32 +76,44 @@ def main():
             produced = generate(question)
         except Exception as e:  # one bad question must not kill a long run
             produced = f"ERROR: {e}"
+        try:
+            free = generate_unconstrained(question)
+        except Exception as e:
+            free = f"ERROR: {e}"
         gen_c = canonicalize(produced)
         gold_c = canonicalize(item["sparql_query"])
+        free_c = canonicalize(free)
         match = gen_c == gold_c
         twin_match = canonicalize_twins(produced) == canonicalize_twins(item["sparql_query"])
+        free_match = free_c == gold_c
         matches += match
         twin_matches += twin_match
+        free_matches += free_match
         results.append({
             "question": question,
             "generated_query": produced,
             "gold_query": item["sparql_query"],
+            "unconstrained_query": free,
             "generated_canonical": gen_c,
             "gold_canonical": gold_c,
+            "unconstrained_canonical": free_c,
             "match": match,
             "match_modulo_twins": twin_match,
+            "unconstrained_match": free_match,
         })
         if i % CHECKPOINT == 0:
             OUT_FILE.write_text(json.dumps(results, indent=2), encoding="utf-8")
             elapsed = time.perf_counter() - start
             print(f"{i}/{len(data)}  exact {matches}/{i} ({matches / i:.1%})  "
                   f"mod-twins {twin_matches}/{i} ({twin_matches / i:.1%})  "
+                  f"unconstrained {free_matches}/{i} ({free_matches / i:.1%})  "
                   f"{elapsed / i:.2f}s per query", flush=True)
 
     OUT_FILE.write_text(json.dumps(results, indent=2), encoding="utf-8")
     elapsed = time.perf_counter() - start
     print(f"done: exact match {matches}/{len(data)} ({matches / len(data):.1%}), "
-          f"modulo twins {twin_matches}/{len(data)} ({twin_matches / len(data):.1%})  "
+          f"modulo twins {twin_matches}/{len(data)} ({twin_matches / len(data):.1%}), "
+          f"unconstrained {free_matches}/{len(data)} ({free_matches / len(data):.1%})  "
           f"({elapsed / len(data):.2f}s per query, {elapsed / 60:.0f} min total)")
 
 
