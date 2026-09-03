@@ -2,7 +2,7 @@
 
 Inputs: dbpedia/class_entities.json (written by extract_entities.py) and
         tbox_reasoner/tbox_rules.json (class_subsumptions + effective ranges)
-Output: dbpedia/class_tries.pkl -- {class_iri: dict-of-dicts trie over BART
+Output: dbpedia/class_tries.pkl -- {class_iri: dict-of-dicts trie over Qwen
         token ids}, with variables ?uri/?x inserted into every trie (object
         slots may be variables) and None as the terminal marker key, plus a
         merged all-entities trie under the reserved key "__ALL__" (walked for
@@ -15,13 +15,14 @@ The tries are tokenizer-dependent: rebuild this file if the model changes.
 """
 
 import json
+import os
 import pickle
 import time
 from pathlib import Path
 
 from transformers import AutoTokenizer
 
-MODEL_ID = "facebook/bart-large"
+MODEL_ID = os.getenv("TRIE_MODEL_ID", "Qwen/Qwen2.5-Coder-1.5B")
 DATA_DIR = Path(__file__).parent.parent / "dbpedia"
 VARIABLES = ["?uri", "?x"]
 TRIE_END = None  # terminal marker key (must match the runtime matcher)

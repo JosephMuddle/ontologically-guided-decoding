@@ -1,12 +1,9 @@
 """
 Type-constrained generation.
 
-Step 1: load the fine-tuned BART weights. A local .env file points at the
-weights file via MODEL_WEIGHTS (the file holds only the weights, no config),
-so the architecture comes from the base facebook/bart-large config.
-strict=False because the checkpoint stores the tied embedding matrix
-once (as model.shared.weight) and BART's encoder/decoder/lm_head embeddings
-are that same tensor.
+Step 1: load the merged Qwen2.5-Coder-1.5B checkpoint produced by the
+fine-tuning notebook. Qwen is a decoder-only causal language model, so the
+question prompt and generated SPARQL share one token sequence.
 
 Step 2: the xgrammar grammars that define legal SPARQL structure -- the five
 beginning templates, and the relation grammar (the predicate whitelist with
@@ -70,9 +67,9 @@ from pathlib import Path
 import torch
 import xgrammar as xgr
 from safetensors.torch import load_file
-from transformers import AutoConfig, AutoModelForSeq2SeqLM, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-MODEL_ID = "facebook/bart-large"
+MODEL_ID = os.getenv("MODEL_ID", "Qwen/Qwen2.5-Coder-1.5B")
 
 
 def load_env(path=Path(__file__).parent / ".env"):
@@ -88,24 +85,59 @@ def load_env(path=Path(__file__).parent / ".env"):
 
 load_env()
 
-MODEL_WEIGHTS = Path(os.environ.get("MODEL_WEIGHTS", "model/lcquad_finetuned.safetensors"))
+MODEL_WEIGHTS = Path(os.environ.get("MODEL_WEIGHTS", "model/qwen_lcquad.safetensors"))
 if not MODEL_WEIGHTS.is_absolute():
     MODEL_WEIGHTS = Path(__file__).parent / MODEL_WEIGHTS
 
 # GPU when one is available (e.g. Colab), CPU otherwise
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+if not MODEL_WEIGHTS.exists():
+    raise FileNotFoundError(
+        f"Fine-tuned weights not found at {MODEL_WEIGHTS}. Set MODEL_WEIGHTS to "
+        "the .safetensors file saved by fine_tune_qwen.ipynb."
+    )
+
+# The notebook fine-tunes every weight of MODEL_ID without touching the
+# architecture or the vocabulary, so config and tokenizer still come from the
+# base model and only the weights are local. Building from the config means no
+# base weights are fetched -- they would all be overwritten anyway.
 config = AutoConfig.from_pretrained(MODEL_ID)
-model = AutoModelForSeq2SeqLM.from_config(config)
-model.load_state_dict(load_file(MODEL_WEIGHTS), strict=False)
+model = AutoModelForCausalLM.from_config(config)
+
+# Qwen2.5 ties lm_head to the input embedding, and save_pretrained drops the
+# duplicate, so lm_head.weight is absent from the file: load non-strictly and
+# re-tie. Any OTHER missing or unexpected key means these weights do not belong
+# to this architecture, which would otherwise leave a silently random model
+missing, unexpected = model.load_state_dict(load_file(MODEL_WEIGHTS), strict=False)
+missing = [k for k in missing if k != "lm_head.weight"]
+if missing or unexpected:
+    raise RuntimeError(
+        f"{MODEL_WEIGHTS} does not match {MODEL_ID}: "
+        f"missing={missing[:5]}, unexpected={unexpected[:5]}"
+    )
+model.tie_weights()
+
+model.to(dtype=torch.bfloat16 if DEVICE.type == "cuda" else torch.float32)
 model.eval()
 model.to(DEVICE)
 
-print(f"loaded {MODEL_WEIGHTS.name} on {DEVICE}")
+print(f"loaded {MODEL_WEIGHTS.name} into {MODEL_ID} on {DEVICE}")
+
+
+def next_logits(sequence_ids):
+    """Return next-token logits for a complete causal-LM context."""
+    with torch.no_grad():
+        return model(
+            input_ids=torch.tensor([sequence_ids], device=DEVICE)
+        ).logits[:, -1, :]
+
 
 # compiled against the tokenizer, so each grammar can later produce a
 # next-token mask, not just accept/reject a finished string
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
 tokenizer_info = xgr.TokenizerInfo.from_huggingface(tokenizer, vocab_size=config.vocab_size)
 compiler = xgr.GrammarCompiler(tokenizer_info)
 
@@ -291,7 +323,7 @@ class Beam:
         return self.score / len(self.tokens)
 
 
-def beam_spell(input_ids, ids, node, stop_tokens, boost_nodes=()):
+def beam_spell(ids, node, stop_tokens, boost_nodes=()):
     """Beam-search the spelling of one entity or variable. Starting from the
     trie node, every live beam is expanded by its BEAM_WIDTH best next tokens
     (the trie children, plus the stop tokens when the node is terminal), the
@@ -310,8 +342,7 @@ def beam_spell(input_ids, ids, node, stop_tokens, boost_nodes=()):
             allowed = [t for t in b.node if t is not None]
             if TRIE_END in b.node:
                 allowed += stop_tokens  # the entity may end here
-            logits = model(input_ids=input_ids,
-                           decoder_input_ids=torch.tensor([ids + b.tokens], device=DEVICE)).logits[:, -1, :]
+            logits = next_logits(ids + b.tokens)
             mask = torch.full_like(logits, float("-inf"))
             mask[0, allowed] = 0.0
             masked = logits + mask
@@ -344,9 +375,10 @@ def generate(question):
     ontological encouragement for relations after an entity subject and for
     objects inside the relation's range -- which runs until the produced
     text closes the query with '}'."""
-    input_ids = tokenizer(question, return_tensors="pt").input_ids.to(DEVICE)
-
-    ids = [config.decoder_start_token_id]  # decoder input; grows across phases
+    prompt = f"Question: {question}\nSPARQL:\n"
+    prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    ids = prompt_ids[:]  # prompt plus generated tokens; grows across phases
+    generated_ids = []   # completion only; excludes the prompt from the result
     query_so_far = ""                      # query text; grows across phases
 
     # phase 1: the beginning template, e.g. 'SELECT DISTINCT ?uri WHERE { ?x'
@@ -354,13 +386,13 @@ def generate(question):
     bitmask = xgr.allocate_token_bitmask(1, config.vocab_size)
     while not matcher.is_terminated():
         matcher.fill_next_token_bitmask(bitmask)
-        logits = model(input_ids=input_ids,
-                       decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
+        logits = next_logits(ids)
         xgr.apply_token_bitmask_inplace(logits, bitmask.to(DEVICE))
         next_id = int(logits.argmax())
         matcher.accept_token(next_id)
         ids.append(next_id)
-    query_so_far += tokenizer.decode(ids[1:], skip_special_tokens=True)
+        generated_ids.append(next_id)
+    query_so_far += tokenizer.decode(generated_ids, skip_special_tokens=True)
 
     # state tracking: the end of the beginning decides what comes next. A
     # trailing variable means the subject is done, so a relation comes next
@@ -393,20 +425,22 @@ def generate(question):
                 node = ALL_ENTITIES_TRIE[LT_ID]
                 prime_text = "<"
             else:
-                logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
+                logits = next_logits(ids)
                 mask = torch.full_like(logits, float("-inf"))
                 mask[0, [GL_LT_ID, GL_QM_ID]] = 0.0
                 next_id = int((logits + mask).argmax())
                 ids.append(next_id)
+                generated_ids.append(next_id)
                 node = ALL_ENTITIES_TRIE[LT_ID if next_id == GL_LT_ID else QM_ID]
                 prime_text = tokenizer.decode([next_id])
             # the spelling is beam-searched; the stop signal is the glued
             # ' <' that opens the coming relation slot (it belongs to the
             # relation slot, so it is excluded from the entity text)
-            ent_ids, stop_id = beam_spell(input_ids, ids, node, [GL_LT_ID])
+            ent_ids, stop_id = beam_spell(ids, node, [GL_LT_ID])
             ids.extend(ent_ids)
             ids.append(stop_id)
+            generated_ids.extend(ent_ids)
+            generated_ids.append(stop_id)
             entity_text = prime_text + tokenizer.decode(ent_ids)
             query_so_far += entity_text
             state["prev"] = entity_text.strip()  # clean bracketed IRI or variable
@@ -433,8 +467,7 @@ def generate(question):
             rel_ids = []
             while not rm.is_terminated():
                 rm.fill_next_token_bitmask(bitmask)
-                logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
+                logits = next_logits(ids)
                 xgr.apply_token_bitmask_inplace(logits, bitmask.to(DEVICE))
                 if boost_node:
                     logits[0, list(boost_node)] += RELATION_BOOST
@@ -442,6 +475,7 @@ def generate(question):
                 rm.accept_token(next_id)
                 ids.append(next_id)
                 rel_ids.append(next_id)
+                generated_ids.append(next_id)
                 boost_node = boost_node.get(next_id) if boost_node else None
             rel_text = prefix + tokenizer.decode(rel_ids)
             query_so_far += rel_text
@@ -459,10 +493,12 @@ def generate(question):
             # beam-searched spelling; stop tokens: ' .' chains another
             # triple, ' }' closes the query (either way the token belongs to
             # what follows, so it is excluded from the entity text)
-            ent_ids, stop_id = beam_spell(input_ids, ids, ALL_ENTITIES_TRIE,
+            ent_ids, stop_id = beam_spell(ids, ALL_ENTITIES_TRIE,
                                           [GL_DOT_ID, GL_RBRACE_ID], boost_nodes)
             ids.extend(ent_ids)
             ids.append(stop_id)
+            generated_ids.extend(ent_ids)
+            generated_ids.append(stop_id)
             query_so_far += tokenizer.decode(ent_ids) + tokenizer.decode([stop_id])
             state["prev"] = tokenizer.decode(ent_ids)  # last entity/variable produced
             if stop_id == GL_DOT_ID:

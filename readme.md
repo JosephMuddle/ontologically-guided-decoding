@@ -33,15 +33,15 @@ Prerequisites to fetch:
 - The two instance-type dumps, placed in `dbpedia/`:
   [instance_types_en.ttl.bz2](https://downloads.dbpedia.org/2016-04/core-i18n/en/instance_types_en.ttl.bz2)
   and [instance_types_transitive_en.ttl.bz2](https://downloads.dbpedia.org/2016-04/core-i18n/en/instance_types_transitive_en.ttl.bz2)
-- The fine-tuned weights, placed at `model/lcquad_finetuned.safetensors`:
-  [Google Drive](https://drive.google.com/file/d/1T6EA00eQYec3cLeVGyjPMLV897jpGOnj/view?usp=sharing).
-  To train your own instead, run `lcquad_finetune_colab.ipynb` on Colab.
+- The merged Qwen checkpoint directory, placed at
+   `model/qwen25-coder-1.5b-lcquad` (or configure `MODEL_PATH` in `.env`).
+   To train your own, run `fine_tuning/fine_tune_qwen.ipynb` on Colab.
 - A `.env` file in the project root:
   ```
   DATA_PATH=dbpedia
-  MODEL_WEIGHTS=model/lcquad_finetuned.safetensors
+   MODEL_PATH=model/qwen25-coder-1.5b-lcquad
   ```
-  (`MODEL_WEIGHTS` is optional; the path above is the default.)
+   (`MODEL_PATH` is optional; the path above is the default.)
 
 Python deps: `pip install torch transformers xgrammar safetensors rdflib python-dotenv`
 
@@ -58,10 +58,11 @@ Run the pipeline in this order:
 3. `python preprocessing/build_class_tries.py`
    - Reads `dbpedia/class_entities.json` and `tbox_reasoner/tbox_rules.json`.
    - Writes `dbpedia/class_tries.pkl`.
-   - Rebuild this whenever the tokenizer/model changes; it currently uses `facebook/bart-large`.
+   - Rebuild this whenever the tokenizer/model changes; it defaults to
+     `Qwen/Qwen2.5-Coder-1.5B` and can be overridden with `TRIE_MODEL_ID`.
 
 4. `python type_constrained_generation.py`
-   - Loads the weights, t-box rules, and class tries, then generates a query for one built-in question as a smoke test.
+   - Loads the merged Qwen model, t-box rules, and class tries, then generates a query for one built-in question as a smoke test.
 
 5. `python test.py`
    - Generates queries for all 1000 LC-QuAD test questions.

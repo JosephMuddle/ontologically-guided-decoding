@@ -4,9 +4,9 @@ All URIs are written as bracketed IRIs (``<http://...>``), matching the SPARQL
 surface form used downstream.
 
 Every property-related calculation is restricted to the LC-QuAD predicate
-whitelist (``predicates.txt``) -- the only predicates that can appear in
-LC-QuAD queries. Class calculations (subsumption, disjointness, equivalence)
-are unrestricted.
+whitelist (``lcquad_data/predicates.txt``) -- the only predicates that can
+appear in LC-QuAD queries. Class calculations (subsumption, disjointness,
+equivalence) are unrestricted.
 
 The class subsumption dictionary maps each parent class URI to all of its
 descendant child class URIs via ``rdfs:subClassOf``. Descendants include direct
@@ -67,7 +67,7 @@ DBPEDIA_OWL_FILE = Path(__file__).with_name("dbpedia_2016-04.owl")
 # Path to the LC-QuAD predicate whitelist: one bare IRI per line. Only these
 # predicates can appear in LC-QuAD queries, so all property calculations are
 # restricted to them.
-PREDICATE_WHITELIST_FILE = Path(__file__).parent.parent / "predicates.txt"
+PREDICATE_WHITELIST_FILE = Path(__file__).parent.parent / "lcquad_data" / "predicates.txt"
 # Where to write the extracted relations as JSON. Set to None to print to stdout.
 OUTPUT_FILE = Path(__file__).with_name("tbox_rules.json")
 # Fallback domain/range for properties with no declared class.
