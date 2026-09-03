@@ -13,7 +13,10 @@ The approach is best summarised as follows: creating syntactically invalid sparq
 After successful construction of one triple, the model decides whether to terminate the query, or to add another triple. This allows for multi-hop queries.
 
 # Notes on entities and complexity
+
 Classes and relations are stored using an XGrammar object. This is due to simplicity, and XGrammar simply compiles these into tries behind the scenes. There are, however, too many entities to compile into an XGrammar effectively, particularly given that producing ontologically restricted bitmasks means recompiling an entity grammar based on the previous relation. Therefore, the entities are compiled directly into tries and stored in a .pkl file. Each trie represents a class, so for example we have a trie representing all entities of type "person", a trie representing all entities of type "vehicle", etc. We only use the direct types for the trie, not the transitive types, in order to save memory. When we want to find the encouraged entities for the next entity to be output, we therefore find the union of all relevant class and subclass tries and overlay them on the overall entity trie. Again, this is because the ontology has large gaps in the data.
+
+Trying pure greedy decoding led to some pretty bad results. So, we introduce a per-slot beam search. The actual structure of the query does not need beam search - we can do that greedily. Empirically, it was found that even with greedy beam search, 92% of the time the correct template was chosen.
 
 # Clean repo run order
 

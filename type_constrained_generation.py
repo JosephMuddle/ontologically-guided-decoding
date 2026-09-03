@@ -34,7 +34,10 @@ so any entity in the KB is legal. This is parse_query's trie_match inverted:
 instead of checking a given token against the trie, the logits are masked to
 the current trie node's children and the model picks. A terminal node also
 offers the glued ' <' that opens the coming relation slot -- that is how the
-model says "the entity ends here".
+model says "the entity ends here". The spelling is chosen by a slot-local
+beam search (beam_spell, width BEAM_WIDTH) scored by mean log-prob per
+token, so a two-token variable spelling no longer beats an entity merely by
+being shorter.
 
 Step 6: the relation slot (idx 1). The hard mask is always the whole
 relation grammar, so every whitelisted relation stays legal and the type
@@ -48,17 +51,20 @@ added to their logits.
 
 Step 7: the object slot (idx 2) and triple chaining. The object is any
 entity or variable from the merged trie; entities inside the relation's
-effective range are encouraged via OBJECT_BOOST. The class tries are
-partitioned by most-specific direct type (extract_entities.py assigns only
-the direct type to class_entities.json), so a superclass trie does NOT
-contain its subclasses: the range boost walks the range class's trie and
-every subclass trie in parallel. The slot ends with the model choosing ' .'
-(chain another triple, back to idx 0) or ' }' (close the query).
+effective range are encouraged via OBJECT_BOOST (variables are not: they sit
+in every class trie, so unexcluded they would be boosted too). The class
+tries are partitioned by most-specific direct type (extract_entities.py
+assigns only the direct type to class_entities.json), so a superclass trie
+does NOT contain its subclasses: the range boost walks the range class's
+trie and every subclass trie in parallel. The slot ends with the model
+choosing ' .' (chain another triple, back to idx 0) or ' }' (close the
+query).
 """
 import json
 import os
 import pickle
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -173,6 +179,11 @@ print(f"loaded {len(CLASS_TRIES)} class tries in {time.time() - _start:.1f}s")
 RELATION_BOOST = 5.0
 OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 
+# width of the slot-local beam search over entity spellings (beam_spell);
+# 1 reproduces greedy picking exactly. SPARKLE used ~7 over the whole query;
+# here it is a per-slot knob to tune
+BEAM_WIDTH = 4
+
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
 EFFECTIVE_PROPERTY_RANGE_MAP = TBOX_RULES["effective_property_range_map"]
 OWL_THING = "<http://www.w3.org/2002/07/owl#Thing>"
@@ -256,6 +267,76 @@ def range_tries(relation):
     return tries
 
 
+# ---------------------------------------------------------------------------
+# slot-local beam search over entity spellings (both entity slots, idx 0/2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Beam:
+    """One candidate spelling inside an entity slot: the tokens chosen so
+    far, their summed log-prob, and the trie cursors they lead to -- node in
+    the merged all-entities trie, boost_nodes in the range class tries walked
+    in parallel (object slot only). stop_id is set once the beam picks a
+    slot-ending token (' <' / ' .' / ' }'), marking the beam finished."""
+    tokens: list
+    score: float
+    node: dict
+    boost_nodes: list
+    stop_id: int = None
+
+    def mean_logprob(self):
+        """Length-normalised beam score. A variable spelling is ~2 tokens, an
+        entity ~10, so raw summed log-probs favour variables -- the entity-drop
+        failure mode. Mean log-prob per token makes the two compete fairly."""
+        return self.score / len(self.tokens)
+
+
+def beam_spell(input_ids, ids, node, stop_tokens, boost_nodes=()):
+    """Beam-search the spelling of one entity or variable. Starting from the
+    trie node, every live beam is expanded by its BEAM_WIDTH best next tokens
+    (the trie children, plus the stop tokens when the node is terminal), the
+    BEAM_WIDTH best beams by mean log-prob are kept, and this repeats until
+    every surviving beam is finished. Returns (spelling token ids, stop token
+    id); the stop token is excluded from the spelling because it belongs to
+    the next slot. Greedy decoding is the BEAM_WIDTH == 1 special case.
+    """
+    beams = [Beam([], 0.0, node, list(boost_nodes))]
+    while any(b.stop_id is None for b in beams):
+        candidates = []
+        for b in beams:
+            if b.stop_id is not None:
+                candidates.append(b)  # finished beams carry over unchanged
+                continue
+            allowed = [t for t in b.node if t is not None]
+            if TRIE_END in b.node:
+                allowed += stop_tokens  # the entity may end here
+            logits = model(input_ids=input_ids,
+                           decoder_input_ids=torch.tensor([ids + b.tokens], device=DEVICE)).logits[:, -1, :]
+            mask = torch.full_like(logits, float("-inf"))
+            mask[0, allowed] = 0.0
+            masked = logits + mask
+            if b.boost_nodes:
+                boosted = {t for bn in b.boost_nodes for t in bn if t is not None}
+                boosted.discard(QM_ID)  # variables stay neutral: no range boost
+                masked[0, list(boosted)] += OBJECT_BOOST
+            logprobs = torch.log_softmax(masked, dim=-1)[0]
+            top = logprobs.topk(BEAM_WIDTH)
+            for lp, tok in zip(top.values.tolist(), top.indices.tolist()):
+                # disallowed tokens (log-prob -inf) match neither branch below
+                if TRIE_END in b.node and tok in stop_tokens:
+                    candidates.append(Beam(b.tokens + [tok], b.score + lp,
+                                           b.node, b.boost_nodes, tok))
+                elif tok in b.node:
+                    # entering the variable branch forfeits the range boost
+                    # for the rest of the spelling
+                    next_boost = [] if tok == QM_ID else [bn[tok] for bn in b.boost_nodes if tok in bn]
+                    candidates.append(Beam(b.tokens + [tok], b.score + lp,
+                                           b.node[tok], next_boost))
+        candidates.sort(key=lambda b: b.mean_logprob(), reverse=True)
+        beams = candidates[:BEAM_WIDTH]
+    return beams[0].tokens[:-1], beams[0].stop_id
+
+
 def generate(question):
     """Generate a SPARQL query for a natural-language question, one
     grammar-constrained phase at a time. Phase 1: the beginning template.
@@ -320,23 +401,12 @@ def generate(question):
                 ids.append(next_id)
                 node = ALL_ENTITIES_TRIE[LT_ID if next_id == GL_LT_ID else QM_ID]
                 prime_text = tokenizer.decode([next_id])
-            ent_ids = []
-            while True:
-                allowed = [t for t in node if t is not None]
-                if TRIE_END in node:
-                    # the subject may end here: offer the glued ' <' that
-                    # opens the coming relation slot as the stop signal
-                    allowed.append(GL_LT_ID)
-                logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
-                mask = torch.full_like(logits, float("-inf"))
-                mask[0, allowed] = 0.0
-                next_id = int((logits + mask).argmax())
-                ids.append(next_id)
-                if next_id == GL_LT_ID:
-                    break  # subject complete; the glued token belongs to the relation slot
-                node = node[next_id]
-                ent_ids.append(next_id)
+            # the spelling is beam-searched; the stop signal is the glued
+            # ' <' that opens the coming relation slot (it belongs to the
+            # relation slot, so it is excluded from the entity text)
+            ent_ids, stop_id = beam_spell(input_ids, ids, node, [GL_LT_ID])
+            ids.extend(ent_ids)
+            ids.append(stop_id)
             entity_text = prime_text + tokenizer.decode(ent_ids)
             query_so_far += entity_text
             state["prev"] = entity_text.strip()  # clean bracketed IRI or variable
@@ -385,32 +455,17 @@ def generate(question):
             # '<' or '?'). Entities inside the relation's effective range are
             # encouraged: their class tries are walked in parallel and tokens
             # continuing one of them get OBJECT_BOOST
-            node = ALL_ENTITIES_TRIE
             boost_nodes = range_tries(state["prev"])
-            ent_ids = []
-            while True:
-                allowed = [t for t in node if t is not None]
-                if TRIE_END in node:
-                    # the object may end here: ' .' chains another triple,
-                    # ' }' closes the query
-                    allowed += [GL_DOT_ID, GL_RBRACE_ID]
-                logits = model(input_ids=input_ids,
-                               decoder_input_ids=torch.tensor([ids], device=DEVICE)).logits[:, -1, :]
-                mask = torch.full_like(logits, float("-inf"))
-                mask[0, allowed] = 0.0
-                if boost_nodes:
-                    boosted = {t for bn in boost_nodes for t in bn if t is not None}
-                    logits[0, list(boosted)] += OBJECT_BOOST
-                next_id = int((logits + mask).argmax())
-                ids.append(next_id)
-                if next_id in (GL_DOT_ID, GL_RBRACE_ID):
-                    break  # object complete; this token is the separator/closer
-                node = node[next_id]
-                boost_nodes = [bn[next_id] for bn in boost_nodes if next_id in bn]
-                ent_ids.append(next_id)
-            query_so_far += tokenizer.decode(ent_ids) + tokenizer.decode([next_id])
+            # beam-searched spelling; stop tokens: ' .' chains another
+            # triple, ' }' closes the query (either way the token belongs to
+            # what follows, so it is excluded from the entity text)
+            ent_ids, stop_id = beam_spell(input_ids, ids, ALL_ENTITIES_TRIE,
+                                          [GL_DOT_ID, GL_RBRACE_ID], boost_nodes)
+            ids.extend(ent_ids)
+            ids.append(stop_id)
+            query_so_far += tokenizer.decode(ent_ids) + tokenizer.decode([stop_id])
             state["prev"] = tokenizer.decode(ent_ids)  # last entity/variable produced
-            if next_id == GL_DOT_ID:
+            if stop_id == GL_DOT_ID:
                 state["idx"] = 0  # ' .' -- the next triple's subject comes next
 
     return query_so_far
