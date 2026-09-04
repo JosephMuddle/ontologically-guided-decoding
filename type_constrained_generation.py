@@ -213,8 +213,9 @@ OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 
 # width of the slot-local beam search over entity spellings (beam_spell);
 # 1 reproduces greedy picking exactly. SPARKLE used ~7 over the whole query;
-# here it is a per-slot knob to tune
-BEAM_WIDTH = 4
+# here it is a per-slot knob to tune. Read from the environment so test.py's
+# --beams can set it without editing this file
+BEAM_WIDTH = int(os.getenv("BEAM_WIDTH", "4"))
 
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
 EFFECTIVE_PROPERTY_RANGE_MAP = TBOX_RULES["effective_property_range_map"]
@@ -370,12 +371,14 @@ def beam_spell(ids, node, stop_tokens, boost_nodes=()):
 
 @torch.no_grad()
 def generate_unconstrained(question, max_new_tokens=160):
-    """The same prompt decoded greedily with no grammar, no tries and no
-    ontological boosts -- whatever the fine-tuned weights produce on their own.
+    """The same prompt decoded with no grammar, no tries and no ontological
+    boosts -- whatever the fine-tuned weights produce on their own.
 
     This is the baseline the constrained decoder is measured against, so it
-    shares generate()'s prompt exactly; only the decoding differs. Generation
-    stops at EOS, which the fine-tune appends to every training target."""
+    shares generate()'s prompt exactly and searches the same number of beams
+    (BEAM_WIDTH, here over the whole query rather than per slot); only the
+    constraints differ. Generation stops at EOS, which the fine-tune appends
+    to every training target."""
     prompt = f"Question: {question}\nSPARQL:\n"
     enc = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(DEVICE)
     out = model.generate(
@@ -529,4 +532,10 @@ def generate(question):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Generate one SPARQL query as a smoke test.")
+    ap.add_argument("--beams", type=int, default=BEAM_WIDTH,
+                    help=f"slot-local beam width (default {BEAM_WIDTH}; 1 is greedy)")
+    BEAM_WIDTH = ap.parse_args().beams  # module-level rebind, so beam_spell sees it
     print(generate("What is the region of Tom Perriello ?"))

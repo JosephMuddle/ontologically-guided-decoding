@@ -11,12 +11,27 @@ constrained query, the gold query and the unconstrained baseline side by side,
 each in both raw and canonical form. Every record is written to output.json,
 rewritten every CHECKPOINT questions so a crash does not lose the run.
 """
+import argparse
 import json
+import os
 import re
 import time
 from pathlib import Path
 
-from type_constrained_generation import generate, generate_unconstrained
+# --beams is parsed before the generation module is imported, because that
+# module reads BEAM_WIDTH from the environment at import time -- and importing
+# it loads the 3 GB checkpoint, which --help should not have to wait for
+if __name__ == "__main__":
+    _ap = argparse.ArgumentParser(description="LC-QuAD test-split evaluation.")
+    _ap.add_argument("--beams", type=int, default=None,
+                     help="beam width: the slot-local beam search in the constrained "
+                          "decoder, and num_beams for the unconstrained baseline "
+                          "(default 4; 1 is greedy)")
+    _beams = _ap.parse_args().beams
+    if _beams is not None:
+        os.environ["BEAM_WIDTH"] = str(_beams)
+
+from type_constrained_generation import BEAM_WIDTH, generate, generate_unconstrained
 
 DATA_FILE = Path(__file__).parent / "lcquad_data" / "test-data.json"
 WHITELIST_FILE = Path(__file__).parent / "lcquad_data" / "predicates.txt"
@@ -64,6 +79,7 @@ def canonicalize_twins(q):
 
 
 def main():
+    print(f"beam width: {BEAM_WIDTH}", flush=True)
     data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     results = []
     matches = 0
