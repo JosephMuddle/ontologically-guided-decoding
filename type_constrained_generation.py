@@ -182,32 +182,28 @@ relation_grammar = compiler.compile_grammar(RELATION_GRAMMAR)
 
 print(f"compiled grammars: 5 beginning templates, {len(RELATIONS)} relations + type tail, {len(CLASSES)} classes")
 
-# grammar-only slots, used by generate_grammar_only(): every position accepts
-# any well-formed IRI or variable on shape alone -- no trie membership check and
-# no predicate whitelist, since three IRIs in a row is perfectly valid SPARQL.
-# The subject and predicate carry the leading space that glues them onto the
-# previous slot, the predicate also carries the trailing one, and the object
-# (which therefore needs no leading space) is followed by the separator that
-# either chains another triple or closes the query. The relation grammar's type
-# tail is not lost by dropping it here: it is just a triple whose predicate is
-# rdf:type, which these rules already produce
-SUBJECT_TEMPLATE = r"""
-root ::= " ?uri" | " ?x" | " <" body ">"
-body ::= [^<> ]+
+# grammar-only rung, used by generate_grammar_only(): ONE grammar for the whole
+# query rather than one per slot. Every position accepts any well-formed IRI or
+# variable on shape alone -- no trie membership check and no predicate
+# whitelist, since three IRIs in a row is perfectly valid SPARQL.
+#
+# The single grammar is what makes it work. Per-slot grammars ended at a slot
+# boundary, which masked out exactly the tokens BPE actually produces there: a
+# grammar ending at ">" rejects "> " and "> <" for overrunning it, leaving only
+# the bare ">" token, which the model almost never emits in that position. It
+# then never closed the IRI and ran away, reaching for oddities like the
+# <|fim_suffix|> special token whose spelling happens to end in ">". With one
+# grammar spanning the query no boundary is forced anywhere, so the natural
+# glued tokens stay legal.
+QUERY_TEMPLATE = r"""
+root    ::= head triples
+head    ::= "SELECT DISTINCT ?uri WHERE { " | "SELECT DISTINCT COUNT(?uri) WHERE { " | "ASK WHERE { "
+triples ::= triple (" . " triple)* " }"
+triple  ::= term " " term " " term
+term    ::= "?uri" | "?x" | "<" body ">"
+body    ::= [^<> ]+
 """
-OBJECT_TEMPLATE = r"""
-root ::= term sep
-term ::= "?uri" | "?x" | "<" body ">"
-body ::= [^<> ]+
-sep  ::= " ." | " }"
-"""
-PREDICATE_TEMPLATE = r"""
-root ::= " ?uri " | " ?x " | " <" body "> "
-body ::= [^<> ]+
-"""
-subject_grammar = compiler.compile_grammar(SUBJECT_TEMPLATE)
-object_grammar = compiler.compile_grammar(OBJECT_TEMPLATE)
-predicate_grammar = compiler.compile_grammar(PREDICATE_TEMPLATE)
+query_grammar = compiler.compile_grammar(QUERY_TEMPLATE)
 
 # entity tries, precomputed by preprocessing/build_class_tries.py: one
 # dict-of-dicts token trie per class plus a merged trie over every entity in
@@ -353,7 +349,8 @@ class Hyp:
     score: float              # summed unmasked log-prob
     mode: str                 # 'constrained' (tries + whitelist + boosts),
                               # 'tries' (the same minus the boosts) or 'grammar'
-    slot: str                 # begin | open | subject | relation | object
+    slot: str                 # query (grammar-only) | begin | open | subject |
+                              # relation | object (the trie rungs)
     slot_ids: list            # tokens of the current slot, for replay and prev
     slot_prime: int = None    # already-emitted token that primes this slot's matcher
     slot_prefix: str = ""     # text of this slot already in gen but not in slot_ids
@@ -375,13 +372,12 @@ class Hyp:
         return m
 
     def _grammar(self):
+        if self.slot == "query":
+            return query_grammar  # grammar-only: one grammar, no slot cycle at all
         if self.slot == "begin":
             return g
         if self.slot == "relation":
-            # grammar-only drops the whitelist: any IRI may be a predicate
-            return predicate_grammar if self.mode == "grammar" else relation_grammar
-        if self.mode == "grammar":
-            return subject_grammar if self.slot == "subject" else object_grammar
+            return relation_grammar
         return None  # constrained entity slots are trie-driven, not grammar-driven
 
     def ranking_logits(self, logits, bitmask):
@@ -420,6 +416,12 @@ class Hyp:
         h = replace(self, ids=self.ids + [tok], gen=self.gen + [tok],
                     score=self.score + logprob, slot_ids=self.slot_ids + [tok])
 
+        if h.slot == "query":
+            # grammar-only: one matcher spans the whole query, so there is no
+            # slot bookkeeping and nothing to transition between
+            h.done = h.matcher(query_grammar).is_terminated()
+            return h
+
         if h.slot == "begin":
             if h.matcher(g).is_terminated():
                 text = h.text()
@@ -428,9 +430,6 @@ class Hyp:
                     h.prev = "?uri" if text.endswith("?uri") else "?x"
                     h.slot, h.slot_ids = "relation", []
                     h.slot_prime, h.slot_prefix = None, ""
-                elif h.mode == "grammar":
-                    h.slot, h.slot_ids = "subject", []
-                    h.slot_prime, h.slot_prefix = GL_LT_ID, "<"
                 else:
                     # a trailing bracket opens an entity slot: the glued token is
                     # already emitted, so prime the trie past its bare bracket
@@ -444,11 +443,6 @@ class Hyp:
             return h
 
         if h.slot == "subject":
-            if h.mode == "grammar":
-                if h.matcher(subject_grammar).is_terminated():
-                    h.slot, h.slot_ids = "relation", []
-                    h.slot_prime, h.slot_prefix = None, ""
-                return h
             if tok == GL_LT_ID and TRIE_END in self.node:
                 # the entity ends here; the glued token belongs to the relation
                 h.prev = (self.slot_prefix + tokenizer.decode(self.slot_ids)).strip()
@@ -464,13 +458,12 @@ class Hyp:
             return h
 
         if h.slot == "relation":
-            if h.matcher(h._grammar()).is_terminated():
+            if h.matcher(relation_grammar).is_terminated():
                 if h.text().endswith("}"):
                     h.done = True  # the type tail closed the query
                 else:
                     h.prev = (h.slot_prefix + tokenizer.decode(h.slot_ids)).strip()
-                    if h.mode != "grammar":
-                        h.node = ALL_ENTITIES_TRIE
+                    h.node = ALL_ENTITIES_TRIE
                     if h.mode == "constrained":
                         h.boost_nodes = tuple(range_tries(h.prev))
                     h.slot, h.slot_ids = "object", []
@@ -480,13 +473,6 @@ class Hyp:
             return h
 
         # object slot
-        if h.mode == "grammar":
-            if h.matcher(object_grammar).is_terminated():
-                if h.text().endswith("}"):
-                    h.done = True
-                else:
-                    h.slot, h.slot_ids = "subject", []  # the separator chains a triple
-            return h
         if tok in (GL_DOT_ID, GL_RBRACE_ID) and TRIE_END in self.node:
             if tok == GL_RBRACE_ID:
                 h.done = True
@@ -576,7 +562,7 @@ def generate_grammar_only(question):
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
-        Hyp(ids=ids, gen=[], score=0.0, mode="grammar", slot="begin", slot_ids=[])
+        Hyp(ids=ids, gen=[], score=0.0, mode="grammar", slot="query", slot_ids=[])
     ).text()
 
 
