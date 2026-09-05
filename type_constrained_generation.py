@@ -332,12 +332,18 @@ class Hyp:
     """One whole-query hypothesis: the tokens chosen so far, their summed
     log-prob, and the constraint state that decides what may legally come next.
 
-    Scoring is the plain sum of UNMASKED log-probs, i.e. log P(query|question)
-    under the model, with no length normalisation. Constraints decide which
-    sequences are reachable, never what one costs, so hypotheses stay
-    commensurable across the rungs of the ablation ladder -- the tries force far
-    more tokens than the grammar-only rules do, and renormalising after the mask
-    would have made those forced tokens free.
+    Scoring is the plain sum of log-probs RENORMALISED over the legal tokens,
+    i.e. log P(query|question) under the constrained model, with no length
+    normalisation. A token the constraints force therefore costs about nothing.
+
+    Scoring the unmasked distribution instead looks more principled and is a
+    trap: the tighter a rung constrains, the more often the model is pushed onto
+    tokens it rates poorly, so every extra token bleeds score and closing the
+    query early becomes the cheapest way to stop paying. Measured on a 50-question
+    run that produced one-triple queries 30 times against gold's 10, and never
+    once produced more triples than gold -- a one-sided error, the signature of a
+    search bias rather than a modelling one. These scores are only ever compared
+    within a single decode, never across rungs, so renormalising costs nothing.
 
     Hypotheses are copied on every branch. Trie nodes are read-only dicts and are
     shared; the xgrammar matchers are stateful and so are never stored -- they
@@ -380,33 +386,41 @@ class Hyp:
             return relation_grammar
         return None  # constrained entity slots are trie-driven, not grammar-driven
 
-    def ranking_logits(self, logits, bitmask):
-        """Logits with everything illegal set to -inf and the ontological boosts
-        added. Used ONLY to choose which candidates to expand: the score comes
-        from the unmasked log-probs, so a boost changes what gets explored but
-        never what a query is worth."""
+    def legal_logits(self, logits, bitmask):
+        """Two views of the next-token logits: `masked`, with everything the
+        constraints forbid set to -inf, and `ranking`, the same plus the
+        ontological boosts.
+
+        The score is a log_softmax over `masked` -- the model's distribution
+        renormalised over the tokens it may actually pick. Selection uses
+        `ranking`, so a boost changes what gets explored but never what a query
+        is worth; boosts are guidance, not evidence."""
         grammar = self._grammar()
         if grammar is not None:
-            out = logits.clone()
+            masked = logits.clone()
             self.matcher(grammar).fill_next_token_bitmask(bitmask)
-            xgr.apply_token_bitmask_inplace(out, bitmask.to(DEVICE))
+            xgr.apply_token_bitmask_inplace(masked, bitmask.to(DEVICE))
             if self.slot == "relation" and self.boost_node:
-                out[0, list(self.boost_node)] += RELATION_BOOST
-            return out
+                ranking = masked.clone()
+                ranking[0, list(self.boost_node)] += RELATION_BOOST
+                return masked, ranking
+            return masked, masked
         if self.slot == "open":
             allowed = [GL_LT_ID, GL_QM_ID]
         else:
             allowed = [t for t in self.node if t is not None]
             if TRIE_END in self.node:
                 allowed += [GL_LT_ID] if self.slot == "subject" else [GL_DOT_ID, GL_RBRACE_ID]
-        out = torch.full_like(logits, float("-inf"))
-        out[0, allowed] = logits[0, allowed]
+        masked = torch.full_like(logits, float("-inf"))
+        masked[0, allowed] = logits[0, allowed]
         if self.slot == "object" and self.boost_nodes:
             boosted = {t for bn in self.boost_nodes for t in bn if t is not None}
             boosted.discard(QM_ID)  # variables stay neutral: no range boost
             if boosted:
-                out[0, list(boosted)] += OBJECT_BOOST  # illegal ones stay -inf
-        return out
+                ranking = masked.clone()
+                ranking[0, list(boosted)] += OBJECT_BOOST  # illegal ones stay -inf
+                return masked, ranking
+        return masked, masked
 
     def advance(self, tok, logprob):
         """The transition: a copy of this hypothesis with tok appended and the
@@ -510,8 +524,10 @@ def whole_query_beam(start, max_new_tokens=160):
         candidates = []
         for h in live:
             logits = next_logits(h.ids)
-            logprobs = torch.log_softmax(logits, dim=-1)[0]  # unmasked: the score
-            ranking = h.ranking_logits(logits, bitmask)      # masked + boosts: the choice
+            masked, ranking = h.legal_logits(logits, bitmask)
+            # renormalised over the legal set, so a forced token costs ~0 and a
+            # constrained rung is not pushed into closing early to stop paying
+            logprobs = torch.log_softmax(masked, dim=-1)[0]
             top = ranking[0].topk(BEAM_WIDTH)
             for val, tok in zip(top.values.tolist(), top.indices.tolist()):
                 if val == float("-inf"):

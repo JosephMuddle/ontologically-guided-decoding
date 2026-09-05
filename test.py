@@ -12,7 +12,9 @@ every column the comparison needs. output.json carries the gold query and all
 four outputs, canonical form only: canonicalisation is whitespace-level and
 loses nothing the evaluation uses, and keeping one spelling per query stops the
 raw and canonical copies drifting apart. Records are rewritten every CHECKPOINT
-questions so a crash does not lose the run.
+questions so a crash does not lose the run, and re-read on startup: a run cut
+short by a Colab timeout resumes at the question after the last record instead
+of starting over. Delete output.json to force a fresh run.
 """
 import argparse
 import json
@@ -104,11 +106,30 @@ def report(hits, twin_hits, n):
 def main():
     print(f"beam width: {BEAM_WIDTH}", flush=True)
     data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    results = []
-    hits = {name: 0 for name, _ in SYSTEMS}
-    twin_hits = 0
+
+    # Resume: an existing output.json is taken as the first N answers and the run
+    # continues at question N+1. A Colab session is routinely shorter than a full
+    # four-rung run, so this is the difference between losing a run and extending
+    # it across sessions.
+    results = json.loads(OUT_FILE.read_text(encoding="utf-8")) if OUT_FILE.exists() else []
+    done = len(results)
+    if done:
+        # a mismatch means this output.json belongs to a different dataset or a
+        # reordered one; continuing would silently interleave two runs
+        assert results[-1]["question"] == data[done - 1]["corrected_question"], (
+            f"{OUT_FILE.name} does not line up with {DATA_FILE.name} at record {done}"
+        )
+        print(f"resuming after {done} records, {len(data) - done} questions left", flush=True)
+    if done >= len(data):
+        print("nothing to do: output.json already covers every question")
+        return
+
+    # seed the counters from what is already on disk, so the reported rates cover
+    # the whole file rather than just this session
+    hits = {name: sum(r[f"{name}_match"] for r in results) for name, _ in SYSTEMS}
+    twin_hits = sum(r["match_modulo_twins"] for r in results)
     start = time.perf_counter()
-    for i, item in enumerate(data, 1):
+    for i, item in enumerate(data[done:], done + 1):
         question = item["corrected_question"]
         gold_c = canonicalize(item["sparql_query"])
         gold_twins = canonicalize_twins(item["sparql_query"])
@@ -129,7 +150,7 @@ def main():
         results.append(record)
         if i % CHECKPOINT == 0:
             OUT_FILE.write_text(json.dumps(results, indent=2), encoding="utf-8")
-            per = (time.perf_counter() - start) / i
+            per = (time.perf_counter() - start) / (i - done)
             print(f"{i}/{len(data)}  {report(hits, twin_hits, i)}  "
                   f"{per:.2f}s per question", flush=True)
 
@@ -137,7 +158,8 @@ def main():
     elapsed = time.perf_counter() - start
     n = len(data)
     print(f"done: {report(hits, twin_hits, n)}  "
-          f"({elapsed / n:.2f}s per question, {elapsed / 60:.0f} min total)")
+          f"({elapsed / (n - done):.2f}s per question over the {n - done} done here, "
+          f"{elapsed / 60:.0f} min this session)")
 
 
 if __name__ == "__main__":
