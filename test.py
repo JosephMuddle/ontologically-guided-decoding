@@ -5,11 +5,14 @@ generator, canonicalize both the produced query and the gold query, and count
 exact string matches. Two metrics are reported: strict exact match, and match
 "modulo namespace twins", where predicates whitelisted in both the ontology/
 and property/ namespaces (e.g. architect) are compared namespace-neutrally.
-Each question is also decoded unconstrained -- straight greedy generation from
-the fine-tuned weights, no grammar or tries -- so output.json carries the
-constrained query, the gold query and the unconstrained baseline side by side,
-each in both raw and canonical form. Every record is written to output.json,
-rewritten every CHECKPOINT questions so a crash does not lose the run.
+Every question is decoded once per rung of the ablation ladder -- the full
+constraint stack, the same minus the ontological boosts, structure-only, and
+the raw fine-tuned weights with no constraints at all -- so one run produces
+every column the comparison needs. output.json carries the gold query and all
+four outputs, canonical form only: canonicalisation is whitespace-level and
+loses nothing the evaluation uses, and keeping one spelling per query stops the
+raw and canonical copies drifting apart. Records are rewritten every CHECKPOINT
+questions so a crash does not lose the run.
 """
 import argparse
 import json
@@ -24,19 +27,32 @@ from pathlib import Path
 if __name__ == "__main__":
     _ap = argparse.ArgumentParser(description="LC-QuAD test-split evaluation.")
     _ap.add_argument("--beams", type=int, default=None,
-                     help="beam width: the slot-local beam search in the constrained "
-                          "decoder, and num_beams for the unconstrained baseline "
-                          "(default 4; 1 is greedy)")
+                     help="beam width: the whole-query beam search in every "
+                          "constrained rung, and num_beams for the unconstrained "
+                          "baseline (default 4; 1 is greedy)")
     _beams = _ap.parse_args().beams
     if _beams is not None:
         os.environ["BEAM_WIDTH"] = str(_beams)
 
-from type_constrained_generation import BEAM_WIDTH, generate, generate_unconstrained
+from type_constrained_generation import (BEAM_WIDTH, generate, generate_grammar_only,
+                                         generate_no_boosts, generate_unconstrained)
 
 DATA_FILE = Path(__file__).parent / "lcquad_data" / "test-data.json"
 WHITELIST_FILE = Path(__file__).parent / "lcquad_data" / "predicates.txt"
 OUT_FILE = Path(__file__).parent / "output.json"
 CHECKPOINT = 10  # questions between progress prints / output.json rewrites
+
+# The ablation ladder, strongest first. Each entry is (record prefix, decoder);
+# the full system keeps the legacy "generated" prefix so existing tooling still
+# finds it. generate() minus generate_no_boosts() isolates the ontological
+# boosts; generate_no_boosts() minus generate_grammar_only() isolates the KB
+# vocabulary (entity tries + relation whitelist) from bare structure.
+SYSTEMS = (
+    ("generated", generate),
+    ("no_boosts", generate_no_boosts),
+    ("grammar_only", generate_grammar_only),
+    ("unconstrained", generate_unconstrained),
+)
 
 
 def canonicalize(q):
@@ -78,59 +94,50 @@ def canonicalize_twins(q):
     return TWIN_RE.sub(r"<dbpedia-twin/\1>", canonicalize(q))
 
 
+def report(hits, twin_hits, n):
+    """One line of exact-match rates, in ladder order."""
+    parts = [f"{name} {hits[name]}/{n} ({hits[name] / n:.1%})" for name, _ in SYSTEMS]
+    parts.insert(1, f"mod-twins {twin_hits}/{n} ({twin_hits / n:.1%})")
+    return "  ".join(parts)
+
+
 def main():
     print(f"beam width: {BEAM_WIDTH}", flush=True)
     data = json.loads(DATA_FILE.read_text(encoding="utf-8"))
     results = []
-    matches = 0
-    twin_matches = 0
-    free_matches = 0
+    hits = {name: 0 for name, _ in SYSTEMS}
+    twin_hits = 0
     start = time.perf_counter()
     for i, item in enumerate(data, 1):
         question = item["corrected_question"]
-        try:
-            produced = generate(question)
-        except Exception as e:  # one bad question must not kill a long run
-            produced = f"ERROR: {e}"
-        try:
-            free = generate_unconstrained(question)
-        except Exception as e:
-            free = f"ERROR: {e}"
-        gen_c = canonicalize(produced)
         gold_c = canonicalize(item["sparql_query"])
-        free_c = canonicalize(free)
-        match = gen_c == gold_c
-        twin_match = canonicalize_twins(produced) == canonicalize_twins(item["sparql_query"])
-        free_match = free_c == gold_c
-        matches += match
-        twin_matches += twin_match
-        free_matches += free_match
-        results.append({
-            "question": question,
-            "generated_query": produced,
-            "gold_query": item["sparql_query"],
-            "unconstrained_query": free,
-            "generated_canonical": gen_c,
-            "gold_canonical": gold_c,
-            "unconstrained_canonical": free_c,
-            "match": match,
-            "match_modulo_twins": twin_match,
-            "unconstrained_match": free_match,
-        })
+        gold_twins = canonicalize_twins(item["sparql_query"])
+        record = {"question": question, "gold_canonical": gold_c}
+        for name, decode in SYSTEMS:
+            try:
+                produced = decode(question)
+            except Exception as e:  # one bad question must not kill a long run
+                produced = f"ERROR: {e}"
+            produced_c = canonicalize(produced)
+            record[f"{name}_canonical"] = produced_c
+            record[f"{name}_match"] = produced_c == gold_c
+            hits[name] += record[f"{name}_match"]
+            if name == "generated":
+                # the twin-neutral variant is only reported for the full system
+                record["match_modulo_twins"] = canonicalize_twins(produced) == gold_twins
+                twin_hits += record["match_modulo_twins"]
+        results.append(record)
         if i % CHECKPOINT == 0:
             OUT_FILE.write_text(json.dumps(results, indent=2), encoding="utf-8")
-            elapsed = time.perf_counter() - start
-            print(f"{i}/{len(data)}  exact {matches}/{i} ({matches / i:.1%})  "
-                  f"mod-twins {twin_matches}/{i} ({twin_matches / i:.1%})  "
-                  f"unconstrained {free_matches}/{i} ({free_matches / i:.1%})  "
-                  f"{elapsed / i:.2f}s per query", flush=True)
+            per = (time.perf_counter() - start) / i
+            print(f"{i}/{len(data)}  {report(hits, twin_hits, i)}  "
+                  f"{per:.2f}s per question", flush=True)
 
     OUT_FILE.write_text(json.dumps(results, indent=2), encoding="utf-8")
     elapsed = time.perf_counter() - start
-    print(f"done: exact match {matches}/{len(data)} ({matches / len(data):.1%}), "
-          f"modulo twins {twin_matches}/{len(data)} ({twin_matches / len(data):.1%}), "
-          f"unconstrained {free_matches}/{len(data)} ({free_matches / len(data):.1%})  "
-          f"({elapsed / len(data):.2f}s per query, {elapsed / 60:.0f} min total)")
+    n = len(data)
+    print(f"done: {report(hits, twin_hits, n)}  "
+          f"({elapsed / n:.2f}s per question, {elapsed / 60:.0f} min total)")
 
 
 if __name__ == "__main__":

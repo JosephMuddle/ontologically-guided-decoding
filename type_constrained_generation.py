@@ -31,10 +31,10 @@ so any entity in the KB is legal. This is parse_query's trie_match inverted:
 instead of checking a given token against the trie, the logits are masked to
 the current trie node's children and the model picks. A terminal node also
 offers the glued ' <' that opens the coming relation slot -- that is how the
-model says "the entity ends here". The spelling is chosen by a slot-local
-beam search (beam_spell, width BEAM_WIDTH) scored by mean log-prob per
-token, so a two-token variable spelling no longer beats an entity merely by
-being shorter.
+model says "the entity ends here". Spellings are not committed slot by slot:
+the whole query is beam-searched (whole_query_beam, width BEAM_WIDTH), so an
+entity chosen here can still lose to an alternative once the rest of the
+triple has been scored.
 
 Step 6: the relation slot (idx 1). The hard mask is always the whole
 relation grammar, so every whitelisted relation stays legal and the type
@@ -61,7 +61,7 @@ import json
 import os
 import pickle
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import torch
@@ -182,6 +182,33 @@ relation_grammar = compiler.compile_grammar(RELATION_GRAMMAR)
 
 print(f"compiled grammars: 5 beginning templates, {len(RELATIONS)} relations + type tail, {len(CLASSES)} classes")
 
+# grammar-only slots, used by generate_grammar_only(): every position accepts
+# any well-formed IRI or variable on shape alone -- no trie membership check and
+# no predicate whitelist, since three IRIs in a row is perfectly valid SPARQL.
+# The subject and predicate carry the leading space that glues them onto the
+# previous slot, the predicate also carries the trailing one, and the object
+# (which therefore needs no leading space) is followed by the separator that
+# either chains another triple or closes the query. The relation grammar's type
+# tail is not lost by dropping it here: it is just a triple whose predicate is
+# rdf:type, which these rules already produce
+SUBJECT_TEMPLATE = r"""
+root ::= " ?uri" | " ?x" | " <" body ">"
+body ::= [^<> ]+
+"""
+OBJECT_TEMPLATE = r"""
+root ::= term sep
+term ::= "?uri" | "?x" | "<" body ">"
+body ::= [^<> ]+
+sep  ::= " ." | " }"
+"""
+PREDICATE_TEMPLATE = r"""
+root ::= " ?uri " | " ?x " | " <" body "> "
+body ::= [^<> ]+
+"""
+subject_grammar = compiler.compile_grammar(SUBJECT_TEMPLATE)
+object_grammar = compiler.compile_grammar(OBJECT_TEMPLATE)
+predicate_grammar = compiler.compile_grammar(PREDICATE_TEMPLATE)
+
 # entity tries, precomputed by preprocessing/build_class_tries.py: one
 # dict-of-dicts token trie per class plus a merged trie over every entity in
 # the KB (variables ?uri/?x are in every trie). Generation walks these where
@@ -211,10 +238,10 @@ print(f"loaded {len(CLASS_TRIES)} class tries in {time.time() - _start:.1f}s")
 RELATION_BOOST = 5.0
 OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 
-# width of the slot-local beam search over entity spellings (beam_spell);
-# 1 reproduces greedy picking exactly. SPARKLE used ~7 over the whole query;
-# here it is a per-slot knob to tune. Read from the environment so test.py's
-# --beams can set it without editing this file
+# width of the whole-query beam search (whole_query_beam); 1 reproduces greedy
+# decoding exactly. SPARKLE used ~7 over the whole query, which is now the same
+# quantity this sets. Read from the environment so test.py's --beams can set it
+# without editing this file
 BEAM_WIDTH = int(os.getenv("BEAM_WIDTH", "4"))
 
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
@@ -301,72 +328,216 @@ def range_tries(relation):
 
 
 # ---------------------------------------------------------------------------
-# slot-local beam search over entity spellings (both entity slots, idx 0/2)
+# whole-query beam search
 # ---------------------------------------------------------------------------
 
 @dataclass
-class Beam:
-    """One candidate spelling inside an entity slot: the tokens chosen so
-    far, their summed log-prob, and the trie cursors they lead to -- node in
-    the merged all-entities trie, boost_nodes in the range class tries walked
-    in parallel (object slot only). stop_id is set once the beam picks a
-    slot-ending token (' <' / ' .' / ' }'), marking the beam finished."""
-    tokens: list
-    score: float
-    node: dict
-    boost_nodes: list
-    stop_id: int = None
+class Hyp:
+    """One whole-query hypothesis: the tokens chosen so far, their summed
+    log-prob, and the constraint state that decides what may legally come next.
 
-    def mean_logprob(self):
-        """Length-normalised beam score. A variable spelling is ~2 tokens, an
-        entity ~10, so raw summed log-probs favour variables -- the entity-drop
-        failure mode. Mean log-prob per token makes the two compete fairly."""
-        return self.score / len(self.tokens)
+    Scoring is the plain sum of UNMASKED log-probs, i.e. log P(query|question)
+    under the model, with no length normalisation. Constraints decide which
+    sequences are reachable, never what one costs, so hypotheses stay
+    commensurable across the rungs of the ablation ladder -- the tries force far
+    more tokens than the grammar-only rules do, and renormalising after the mask
+    would have made those forced tokens free.
 
-
-def beam_spell(ids, node, stop_tokens, boost_nodes=()):
-    """Beam-search the spelling of one entity or variable. Starting from the
-    trie node, every live beam is expanded by its BEAM_WIDTH best next tokens
-    (the trie children, plus the stop tokens when the node is terminal), the
-    BEAM_WIDTH best beams by mean log-prob are kept, and this repeats until
-    every surviving beam is finished. Returns (spelling token ids, stop token
-    id); the stop token is excluded from the spelling because it belongs to
-    the next slot. Greedy decoding is the BEAM_WIDTH == 1 special case.
+    Hypotheses are copied on every branch. Trie nodes are read-only dicts and are
+    shared; the xgrammar matchers are stateful and so are never stored -- they
+    are rebuilt from slot_ids on demand, a handful of accept_token calls against
+    one model forward per beam per step.
     """
-    beams = [Beam([], 0.0, node, list(boost_nodes))]
-    while any(b.stop_id is None for b in beams):
+    ids: list                 # prompt + generated tokens
+    gen: list                 # generated tokens only -- the query
+    score: float              # summed unmasked log-prob
+    mode: str                 # 'constrained' (tries + whitelist + boosts),
+                              # 'tries' (the same minus the boosts) or 'grammar'
+    slot: str                 # begin | open | subject | relation | object
+    slot_ids: list            # tokens of the current slot, for replay and prev
+    slot_prime: int = None    # already-emitted token that primes this slot's matcher
+    slot_prefix: str = ""     # text of this slot already in gen but not in slot_ids
+    node: dict = None         # cursor in the merged all-entities trie
+    boost_nodes: tuple = ()   # range-class trie cursors (object slot)
+    boost_node: dict = None   # encouraged-relation trie cursor (relation slot)
+    prev: str = None          # previous term, for the ontological boosts
+    done: bool = False
+
+    def text(self):
+        return tokenizer.decode(self.gen)
+
+    def matcher(self, grammar):
+        m = xgr.GrammarMatcher(grammar, terminate_without_stop_token=True)
+        if self.slot_prime is not None:
+            m.accept_token(self.slot_prime)
+        for tok in self.slot_ids:
+            m.accept_token(tok)
+        return m
+
+    def _grammar(self):
+        if self.slot == "begin":
+            return g
+        if self.slot == "relation":
+            # grammar-only drops the whitelist: any IRI may be a predicate
+            return predicate_grammar if self.mode == "grammar" else relation_grammar
+        if self.mode == "grammar":
+            return subject_grammar if self.slot == "subject" else object_grammar
+        return None  # constrained entity slots are trie-driven, not grammar-driven
+
+    def ranking_logits(self, logits, bitmask):
+        """Logits with everything illegal set to -inf and the ontological boosts
+        added. Used ONLY to choose which candidates to expand: the score comes
+        from the unmasked log-probs, so a boost changes what gets explored but
+        never what a query is worth."""
+        grammar = self._grammar()
+        if grammar is not None:
+            out = logits.clone()
+            self.matcher(grammar).fill_next_token_bitmask(bitmask)
+            xgr.apply_token_bitmask_inplace(out, bitmask.to(DEVICE))
+            if self.slot == "relation" and self.boost_node:
+                out[0, list(self.boost_node)] += RELATION_BOOST
+            return out
+        if self.slot == "open":
+            allowed = [GL_LT_ID, GL_QM_ID]
+        else:
+            allowed = [t for t in self.node if t is not None]
+            if TRIE_END in self.node:
+                allowed += [GL_LT_ID] if self.slot == "subject" else [GL_DOT_ID, GL_RBRACE_ID]
+        out = torch.full_like(logits, float("-inf"))
+        out[0, allowed] = logits[0, allowed]
+        if self.slot == "object" and self.boost_nodes:
+            boosted = {t for bn in self.boost_nodes for t in bn if t is not None}
+            boosted.discard(QM_ID)  # variables stay neutral: no range boost
+            if boosted:
+                out[0, list(boosted)] += OBJECT_BOOST  # illegal ones stay -inf
+        return out
+
+    def advance(self, tok, logprob):
+        """The transition: a copy of this hypothesis with tok appended and the
+        constraint state moved on. Mirrors the slot cycle of the phase-by-phase
+        decoder -- begin, then subject/relation/object until the text closes
+        the query with a brace."""
+        h = replace(self, ids=self.ids + [tok], gen=self.gen + [tok],
+                    score=self.score + logprob, slot_ids=self.slot_ids + [tok])
+
+        if h.slot == "begin":
+            if h.matcher(g).is_terminated():
+                text = h.text()
+                if text.endswith(("?uri", "?x")):
+                    # a trailing variable means the subject is already done
+                    h.prev = "?uri" if text.endswith("?uri") else "?x"
+                    h.slot, h.slot_ids = "relation", []
+                    h.slot_prime, h.slot_prefix = None, ""
+                elif h.mode == "grammar":
+                    h.slot, h.slot_ids = "subject", []
+                    h.slot_prime, h.slot_prefix = GL_LT_ID, "<"
+                else:
+                    # a trailing bracket opens an entity slot: the glued token is
+                    # already emitted, so prime the trie past its bare bracket
+                    h.slot, h.slot_ids = "subject", []
+                    h.node, h.slot_prefix = ALL_ENTITIES_TRIE[LT_ID], "<"
+            return h
+
+        if h.slot == "open":  # constrained only: the glued opener was just chosen
+            h.node = ALL_ENTITIES_TRIE[LT_ID if tok == GL_LT_ID else QM_ID]
+            h.slot = "subject"
+            return h
+
+        if h.slot == "subject":
+            if h.mode == "grammar":
+                if h.matcher(subject_grammar).is_terminated():
+                    h.slot, h.slot_ids = "relation", []
+                    h.slot_prime, h.slot_prefix = None, ""
+                return h
+            if tok == GL_LT_ID and TRIE_END in self.node:
+                # the entity ends here; the glued token belongs to the relation
+                h.prev = (self.slot_prefix + tokenizer.decode(self.slot_ids)).strip()
+                h.slot, h.slot_ids, h.node = "relation", [], None
+                h.slot_prime, h.slot_prefix = GL_LT_ID, " <"
+                h.boost_node = (
+                    build_boost_trie(encouraged_relations(entity_types(h.prev)))
+                    if h.mode == "constrained" and h.prev not in ("?uri", "?x")
+                    else None
+                )
+            else:
+                h.node = self.node[tok]
+            return h
+
+        if h.slot == "relation":
+            if h.matcher(h._grammar()).is_terminated():
+                if h.text().endswith("}"):
+                    h.done = True  # the type tail closed the query
+                else:
+                    h.prev = (h.slot_prefix + tokenizer.decode(h.slot_ids)).strip()
+                    if h.mode != "grammar":
+                        h.node = ALL_ENTITIES_TRIE
+                    if h.mode == "constrained":
+                        h.boost_nodes = tuple(range_tries(h.prev))
+                    h.slot, h.slot_ids = "object", []
+                    h.slot_prime, h.slot_prefix = None, ""
+            else:
+                h.boost_node = h.boost_node.get(tok) if h.boost_node else None
+            return h
+
+        # object slot
+        if h.mode == "grammar":
+            if h.matcher(object_grammar).is_terminated():
+                if h.text().endswith("}"):
+                    h.done = True
+                else:
+                    h.slot, h.slot_ids = "subject", []  # the separator chains a triple
+            return h
+        if tok in (GL_DOT_ID, GL_RBRACE_ID) and TRIE_END in self.node:
+            if tok == GL_RBRACE_ID:
+                h.done = True
+            else:
+                h.slot, h.slot_ids = "open", []
+                h.node, h.boost_nodes = None, ()
+        else:
+            h.node = self.node[tok]
+            h.boost_nodes = (
+                () if tok == QM_ID
+                else tuple(bn[tok] for bn in self.boost_nodes if tok in bn)
+            )
+        return h
+
+
+def whole_query_beam(start, max_new_tokens=160):
+    """Token-synchronous beam search over whole queries.
+
+    Every live hypothesis advances exactly one token per round, so they always
+    share a length and the plain summed log-prob ranks them fairly -- there is
+    nothing left for a length normalisation to correct. Finished hypotheses are
+    held in a separate pool and never compete with growing ones directly: since
+    log-probs are non-positive a live score can only fall, so once no live
+    hypothesis can still beat the best completed one the search is provably
+    finished. Together that leaves the search with no preference of its own for
+    long or short queries.
+    """
+    bitmask = xgr.allocate_token_bitmask(1, config.vocab_size)
+    live, completed = [start], []
+    for _ in range(max_new_tokens):
+        best_done = max((h.score for h in completed), default=float("-inf"))
+        live = [h for h in live if h.score > best_done]
+        if not live:
+            break
         candidates = []
-        for b in beams:
-            if b.stop_id is not None:
-                candidates.append(b)  # finished beams carry over unchanged
-                continue
-            allowed = [t for t in b.node if t is not None]
-            if TRIE_END in b.node:
-                allowed += stop_tokens  # the entity may end here
-            logits = next_logits(ids + b.tokens)
-            mask = torch.full_like(logits, float("-inf"))
-            mask[0, allowed] = 0.0
-            masked = logits + mask
-            if b.boost_nodes:
-                boosted = {t for bn in b.boost_nodes for t in bn if t is not None}
-                boosted.discard(QM_ID)  # variables stay neutral: no range boost
-                masked[0, list(boosted)] += OBJECT_BOOST
-            logprobs = torch.log_softmax(masked, dim=-1)[0]
-            top = logprobs.topk(BEAM_WIDTH)
-            for lp, tok in zip(top.values.tolist(), top.indices.tolist()):
-                # disallowed tokens (log-prob -inf) match neither branch below
-                if TRIE_END in b.node and tok in stop_tokens:
-                    candidates.append(Beam(b.tokens + [tok], b.score + lp,
-                                           b.node, b.boost_nodes, tok))
-                elif tok in b.node:
-                    # entering the variable branch forfeits the range boost
-                    # for the rest of the spelling
-                    next_boost = [] if tok == QM_ID else [bn[tok] for bn in b.boost_nodes if tok in bn]
-                    candidates.append(Beam(b.tokens + [tok], b.score + lp,
-                                           b.node[tok], next_boost))
-        candidates.sort(key=lambda b: b.mean_logprob(), reverse=True)
-        beams = candidates[:BEAM_WIDTH]
-    return beams[0].tokens[:-1], beams[0].stop_id
+        for h in live:
+            logits = next_logits(h.ids)
+            logprobs = torch.log_softmax(logits, dim=-1)[0]  # unmasked: the score
+            ranking = h.ranking_logits(logits, bitmask)      # masked + boosts: the choice
+            top = ranking[0].topk(BEAM_WIDTH)
+            for val, tok in zip(top.values.tolist(), top.indices.tolist()):
+                if val == float("-inf"):
+                    continue  # fewer legal tokens than BEAM_WIDTH: skip the pad
+                candidates.append(h.advance(tok, logprobs[tok].item()))
+        if not candidates:
+            break
+        candidates.sort(key=lambda h: h.score, reverse=True)
+        live = []
+        for h in candidates[:BEAM_WIDTH]:
+            (completed if h.done else live).append(h)
+    return max(completed or live, key=lambda h: h.score)
 
 
 @torch.no_grad()
@@ -392,143 +563,57 @@ def generate_unconstrained(question, max_new_tokens=160):
     return tokenizer.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
 
 
-def generate(question):
-    """Generate a SPARQL query for a natural-language question, one
-    grammar-constrained phase at a time. Phase 1: the beginning template.
-    Phase 2: the triples loop -- subject, relation and object slots, with
-    ontological encouragement for relations after an entity subject and for
-    objects inside the relation's range -- which runs until the produced
-    text closes the query with '}'."""
+def generate_grammar_only(question):
+    """Generate a SPARQL query for a natural-language question using the
+    grammar alone -- no entity tries and no ontological boosts. The opening is
+    one of the five beginning templates; entity slots accept any well-formed
+    IRI or variable on shape alone -- the predicate slot included, since three
+    IRIs in a row is valid SPARQL -- and the query chains triples on ' .' until
+    it closes with ' }'.
+
+    The grammar-only rung of the ablation ladder: same model, same whole-query
+    beam search as generate(), only the constraints differ."""
     prompt = f"Question: {question}\nSPARQL:\n"
-    prompt_ids = tokenizer(prompt, add_special_tokens=False).input_ids
-    ids = prompt_ids[:]  # prompt plus generated tokens; grows across phases
-    generated_ids = []   # completion only; excludes the prompt from the result
-    query_so_far = ""                      # query text; grows across phases
+    ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    return whole_query_beam(
+        Hyp(ids=ids, gen=[], score=0.0, mode="grammar", slot="begin", slot_ids=[])
+    ).text()
 
-    # phase 1: the beginning template, e.g. 'SELECT DISTINCT ?uri WHERE { ?x'
-    matcher = xgr.GrammarMatcher(g, terminate_without_stop_token=True)
-    bitmask = xgr.allocate_token_bitmask(1, config.vocab_size)
-    while not matcher.is_terminated():
-        matcher.fill_next_token_bitmask(bitmask)
-        logits = next_logits(ids)
-        xgr.apply_token_bitmask_inplace(logits, bitmask.to(DEVICE))
-        next_id = int(logits.argmax())
-        matcher.accept_token(next_id)
-        ids.append(next_id)
-        generated_ids.append(next_id)
-    query_so_far += tokenizer.decode(generated_ids, skip_special_tokens=True)
 
-    # state tracking: the end of the beginning decides what comes next. A
-    # trailing variable means the subject is done, so a relation comes next
-    # (idx 1) and prev records which variable; a trailing '<' opens an entity
-    # slot (idx 0, prev None) -- strip the '<' from the text, it is re-added
-    # together with the entity itself
-    idx = 1 if query_so_far.endswith(("?uri", "?x")) else 0
-    prev = "?uri" if query_so_far.endswith("?uri") else ("?x" if query_so_far.endswith("?x") else None)
-    state = {"idx": idx, "prev": prev}
-    if idx == 0:
-        query_so_far = query_so_far[:-1]
+def generate_no_boosts(question):
+    """Generate a SPARQL query under the hard constraints only: the beginning
+    grammar, the merged entity trie on both entity slots, and the relation
+    whitelist -- with none of the ontological encouragement. No domain check on
+    the relation that follows an entity subject, no range check on the object.
 
-    # phase 2: the triples. The independent ifs let a whole triple cascade
-    # through a single iteration (subject -> relation -> object). Supports
-    # any number of triples: the loop ends only when the produced text closes
-    # the query with '}'
-    while not query_so_far.endswith("}"):
-        if state["idx"] == 0:
-            # entity slot: the subject of a triple. Guided by the merged
-            # all-entities trie -- no relation has been chosen yet, so no
-            # domain/range constraint can apply and any entity (or variable)
-            # is legal. Two ways in: an ent beginning template already
-            # produced the glued ' <' (its '<' was stripped from query_so_far
-            # for bookkeeping), forcing an entity; after a ' .' separator
-            # nothing is produced yet, so the model picks the subject kind
-            # itself with the glued token -- ' <' (entity) or ' ?'
-            # (variable). Either way the glued token maps onto the bare trie
-            # prime, exactly as trie_match does
-            if tokenizer.decode([ids[-1]]) == " <":
-                node = ALL_ENTITIES_TRIE[LT_ID]
-                prime_text = "<"
-            else:
-                logits = next_logits(ids)
-                mask = torch.full_like(logits, float("-inf"))
-                mask[0, [GL_LT_ID, GL_QM_ID]] = 0.0
-                next_id = int((logits + mask).argmax())
-                ids.append(next_id)
-                generated_ids.append(next_id)
-                node = ALL_ENTITIES_TRIE[LT_ID if next_id == GL_LT_ID else QM_ID]
-                prime_text = tokenizer.decode([next_id])
-            # the spelling is beam-searched; the stop signal is the glued
-            # ' <' that opens the coming relation slot (it belongs to the
-            # relation slot, so it is excluded from the entity text)
-            ent_ids, stop_id = beam_spell(ids, node, [GL_LT_ID])
-            ids.extend(ent_ids)
-            ids.append(stop_id)
-            generated_ids.extend(ent_ids)
-            generated_ids.append(stop_id)
-            entity_text = prime_text + tokenizer.decode(ent_ids)
-            query_so_far += entity_text
-            state["prev"] = entity_text.strip()  # clean bracketed IRI or variable
-            state["idx"] = 1                     # subject done, a relation comes next
-        if state["idx"] == 1:
-            # relation slot. The hard mask is always the full relation
-            # grammar: every whitelisted relation stays legal, the model
-            # chooses among them, and the type tail can close the query with
-            # '}', which ends the triples loop
-            rm = xgr.GrammarMatcher(relation_grammar, terminate_without_stop_token=True)
-            prefix = ""
-            if ids[-1] == GL_LT_ID:
-                # the entity slot ended on this slot's glued ' <' (it is the
-                # last decoder token), so prime the matcher with it; its text
-                # goes back in via the prefix
-                rm.accept_token(ids[-1])
-                prefix = " <"
-            boost_node = None
-            if state["prev"] not in ("?uri", "?x"):
-                # entity subject: layer soft ontological guidance on top of
-                # the hard mask -- tokens continuing a relation whose domains
-                # the subject's types cover get RELATION_BOOST
-                boost_node = build_boost_trie(encouraged_relations(entity_types(state["prev"])))
-            rel_ids = []
-            while not rm.is_terminated():
-                rm.fill_next_token_bitmask(bitmask)
-                logits = next_logits(ids)
-                xgr.apply_token_bitmask_inplace(logits, bitmask.to(DEVICE))
-                if boost_node:
-                    logits[0, list(boost_node)] += RELATION_BOOST
-                next_id = int(logits.argmax())
-                rm.accept_token(next_id)
-                ids.append(next_id)
-                rel_ids.append(next_id)
-                generated_ids.append(next_id)
-                boost_node = boost_node.get(next_id) if boost_node else None
-            rel_text = prefix + tokenizer.decode(rel_ids)
-            query_so_far += rel_text
-            if not query_so_far.endswith("}"):
-                state["idx"] = 2
-                state["prev"] = rel_text.strip()  # the bracketed relation IRI
-        if state["idx"] == 2:
-            # object slot: any entity or variable is legal, so the merged
-            # all-entities trie is walked from the root (the relation ended
-            # on a standalone space token, so the object starts with a bare
-            # '<' or '?'). Entities inside the relation's effective range are
-            # encouraged: their class tries are walked in parallel and tokens
-            # continuing one of them get OBJECT_BOOST
-            boost_nodes = range_tries(state["prev"])
-            # beam-searched spelling; stop tokens: ' .' chains another
-            # triple, ' }' closes the query (either way the token belongs to
-            # what follows, so it is excluded from the entity text)
-            ent_ids, stop_id = beam_spell(ids, ALL_ENTITIES_TRIE,
-                                          [GL_DOT_ID, GL_RBRACE_ID], boost_nodes)
-            ids.extend(ent_ids)
-            ids.append(stop_id)
-            generated_ids.extend(ent_ids)
-            generated_ids.append(stop_id)
-            query_so_far += tokenizer.decode(ent_ids) + tokenizer.decode([stop_id])
-            state["prev"] = tokenizer.decode(ent_ids)  # last entity/variable produced
-            if stop_id == GL_DOT_ID:
-                state["idx"] = 0  # ' .' -- the next triple's subject comes next
+    The rung between generate_grammar_only() and generate(): everything that
+    decides WHICH strings are legal is present, everything that merely nudges
+    the model towards ontologically coherent choices is gone, so the gap to
+    generate() isolates the boosts."""
+    prompt = f"Question: {question}\nSPARQL:\n"
+    ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    return whole_query_beam(
+        Hyp(ids=ids, gen=[], score=0.0, mode="tries", slot="begin", slot_ids=[])
+    ).text()
 
-    return query_so_far
+
+def generate(question):
+    """Generate a SPARQL query for a natural-language question under the full
+    constraint stack: the beginning grammar, the merged entity trie on both
+    entity slots, the relation grammar, and the ontological boosts (relations
+    whose domains the subject's types cover, objects inside the relation's
+    effective range).
+
+    Searched as one whole-query beam of BEAM_WIDTH rather than slot by slot, so
+    an opening template or a subject entity can still be revised once the rest
+    of the triple turns out implausible. Scoring is the unnormalised sum of
+    unmasked log-probs; see whole_query_beam() for why that leaves the search
+    without a length preference of its own."""
+    prompt = f"Question: {question}\nSPARQL:\n"
+    ids = tokenizer(prompt, add_special_tokens=False).input_ids
+    return whole_query_beam(
+        Hyp(ids=ids, gen=[], score=0.0, mode="constrained", slot="begin", slot_ids=[])
+    ).text()
 
 
 if __name__ == "__main__":
@@ -536,6 +621,6 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser(description="Generate one SPARQL query as a smoke test.")
     ap.add_argument("--beams", type=int, default=BEAM_WIDTH,
-                    help=f"slot-local beam width (default {BEAM_WIDTH}; 1 is greedy)")
-    BEAM_WIDTH = ap.parse_args().beams  # module-level rebind, so beam_spell sees it
+                    help=f"beam width (default {BEAM_WIDTH}; 1 is greedy)")
+    BEAM_WIDTH = ap.parse_args().beams  # module-level rebind, so the search sees it
     print(generate("What is the region of Tom Perriello ?"))
