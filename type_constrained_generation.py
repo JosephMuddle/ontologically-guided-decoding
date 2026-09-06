@@ -394,42 +394,37 @@ class Hyp:
         return None  # constrained entity slots are trie-driven, not grammar-driven
 
     def legal_logits(self, logits, bitmask):
-        """Two views of the next-token logits: `masked`, with everything the
-        constraints forbid set to -inf, and `ranking`, the same plus the
-        ontological boosts.
+        """The next-token logits with everything the constraints forbid set to
+        -inf and the ontological boosts added on top of what survives.
 
-        Both are renormalised over the legal set when scored, so a token the
-        constraints force costs about nothing. `masked` is kept separate because
-        it is the boost-free view -- useful for inspecting what the model alone
-        thought -- but the search now scores from `ranking`, so a boost lowers
-        the price of an ontologically compatible path instead of only putting it
-        on the shortlist. With no boosts to apply the two are the same object."""
+        One tensor does both jobs. The search renormalises it over the legal
+        set, so a token the constraints force costs about nothing, and a boost
+        lowers the price of an ontologically compatible path rather than only
+        putting it on the shortlist. The boosts go in in place: an illegal token
+        is already -inf and -inf + boost is still -inf, so nothing the
+        constraints ruled out can come back through the boost."""
         grammar = self._grammar()
         if grammar is not None:
-            masked = logits.clone()
+            ranking = logits.clone()
             self.matcher(grammar).fill_next_token_bitmask(bitmask)
-            xgr.apply_token_bitmask_inplace(masked, bitmask.to(DEVICE))
+            xgr.apply_token_bitmask_inplace(ranking, bitmask.to(DEVICE))
             if self.slot == "relation" and self.boost_node:
-                ranking = masked.clone()
                 ranking[0, list(self.boost_node)] += RELATION_BOOST
-                return masked, ranking
-            return masked, masked
+            return ranking
         if self.slot == "open":
             allowed = [GL_LT_ID, GL_QM_ID]
         else:
             allowed = [t for t in self.node if t is not None]
             if TRIE_END in self.node:
                 allowed += [GL_LT_ID] if self.slot == "subject" else [GL_DOT_ID, GL_RBRACE_ID]
-        masked = torch.full_like(logits, float("-inf"))
-        masked[0, allowed] = logits[0, allowed]
+        ranking = torch.full_like(logits, float("-inf"))
+        ranking[0, allowed] = logits[0, allowed]
         if self.slot == "object" and self.boost_nodes:
             boosted = {t for bn in self.boost_nodes for t in bn if t is not None}
             boosted.discard(QM_ID)  # variables stay neutral: no range boost
             if boosted:
-                ranking = masked.clone()
                 ranking[0, list(boosted)] += OBJECT_BOOST  # illegal ones stay -inf
-                return masked, ranking
-        return masked, masked
+        return ranking
 
     def advance(self, tok, logprob):
         """The transition: a copy of this hypothesis with tok appended and the
@@ -534,11 +529,11 @@ def whole_query_beam(start, max_new_tokens=160):
         candidates = []
         for h in live:
             logits = next_logits(h.ids)
-            masked, ranking = h.legal_logits(logits, bitmask)
+            ranking = h.legal_logits(logits, bitmask)
             # renormalised over the legal set, so a forced token costs ~0 and a
             # constrained rung is not pushed into closing early to stop paying.
-            # Scored from `ranking`, so the ontological boosts make a compatible
-            # path genuinely cheaper rather than merely shortlisting it
+            # The boosts are already folded in, so they make a compatible path
+            # genuinely cheaper rather than merely shortlisting it
             logprobs = torch.log_softmax(ranking, dim=-1)[0]
             top = ranking[0].topk(BEAM_WIDTH)
             for val, tok in zip(top.values.tolist(), top.indices.tolist()):
