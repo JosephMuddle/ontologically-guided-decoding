@@ -333,8 +333,15 @@ class Hyp:
     log-prob, and the constraint state that decides what may legally come next.
 
     Scoring is the plain sum of log-probs RENORMALISED over the legal tokens,
-    i.e. log P(query|question) under the constrained model, with no length
-    normalisation. A token the constraints force therefore costs about nothing.
+    with the ontological boosts included, and no length normalisation. A token
+    the constraints force therefore costs about nothing.
+
+    Including the boosts makes the score a guided objective rather than a plain
+    log P(query|question): that is deliberate. Scored boost-free, a boost could
+    only change which candidates got expanded, and since a trie node usually has
+    fewer children than BEAM_WIDTH there was nothing to expand differently -- it
+    altered 2 outputs in 1000 and flipped no matches. Soft guidance has to price
+    the path to do anything at all.
 
     Scoring the unmasked distribution instead looks more principled and is a
     trap: the tighter a rung constrains, the more often the model is pushed onto
@@ -391,10 +398,12 @@ class Hyp:
         constraints forbid set to -inf, and `ranking`, the same plus the
         ontological boosts.
 
-        The score is a log_softmax over `masked` -- the model's distribution
-        renormalised over the tokens it may actually pick. Selection uses
-        `ranking`, so a boost changes what gets explored but never what a query
-        is worth; boosts are guidance, not evidence."""
+        Both are renormalised over the legal set when scored, so a token the
+        constraints force costs about nothing. `masked` is kept separate because
+        it is the boost-free view -- useful for inspecting what the model alone
+        thought -- but the search now scores from `ranking`, so a boost lowers
+        the price of an ontologically compatible path instead of only putting it
+        on the shortlist. With no boosts to apply the two are the same object."""
         grammar = self._grammar()
         if grammar is not None:
             masked = logits.clone()
@@ -506,8 +515,9 @@ def whole_query_beam(start, max_new_tokens=160):
     """Token-synchronous beam search over whole queries.
 
     Every live hypothesis advances exactly one token per round, so they always
-    share a length and the plain summed log-prob ranks them fairly -- there is
-    nothing left for a length normalisation to correct. Finished hypotheses are
+    share a length and the summed log-prob (renormalised over the legal tokens,
+    boosts included) ranks them fairly -- there is nothing left for a length
+    normalisation to correct. Finished hypotheses are
     held in a separate pool and never compete with growing ones directly: since
     log-probs are non-positive a live score can only fall, so once no live
     hypothesis can still beat the best completed one the search is provably
@@ -526,8 +536,10 @@ def whole_query_beam(start, max_new_tokens=160):
             logits = next_logits(h.ids)
             masked, ranking = h.legal_logits(logits, bitmask)
             # renormalised over the legal set, so a forced token costs ~0 and a
-            # constrained rung is not pushed into closing early to stop paying
-            logprobs = torch.log_softmax(masked, dim=-1)[0]
+            # constrained rung is not pushed into closing early to stop paying.
+            # Scored from `ranking`, so the ontological boosts make a compatible
+            # path genuinely cheaper rather than merely shortlisting it
+            logprobs = torch.log_softmax(ranking, dim=-1)[0]
             top = ranking[0].topk(BEAM_WIDTH)
             for val, tok in zip(top.values.tolist(), top.indices.tolist()):
                 if val == float("-inf"):
@@ -608,9 +620,9 @@ def generate(question):
 
     Searched as one whole-query beam of BEAM_WIDTH rather than slot by slot, so
     an opening template or a subject entity can still be revised once the rest
-    of the triple turns out implausible. Scoring is the unnormalised sum of
-    unmasked log-probs; see whole_query_beam() for why that leaves the search
-    without a length preference of its own."""
+    of the triple turns out implausible. Scoring sums log-probs renormalised
+    over the legal tokens with the boosts folded in; see whole_query_beam() and
+    Hyp for why."""
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
