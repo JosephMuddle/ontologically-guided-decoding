@@ -132,12 +132,33 @@ model.to(DEVICE)
 print(f"loaded {MODEL_WEIGHTS.name} into {MODEL_ID} on {DEVICE}")
 
 
-def next_logits(sequence_ids):
-    """Return next-token logits for a complete causal-LM context."""
+def decoder_step(input_ids, cache, attention_mask):
+    """One decoding step for the whole beam at once: next-token logits for every
+    row, and the KV cache grown by the tokens just fed in.
+
+    Row i of every argument and of the result belongs to live hypothesis i. On a
+    query's first step `cache` is None and `input_ids` is the whole prompt; from
+    then on the cache already holds every token but the newest, so exactly one
+    token per row goes through the model. Without this the beam re-read its
+    entire prefix at every token of every hypothesis, which is quadratic in the
+    query length and linear in the beam width on top."""
     with torch.no_grad():
-        return model(
-            input_ids=torch.tensor([sequence_ids], device=DEVICE)
-        ).logits[:, -1, :]
+        out = model(input_ids=input_ids, attention_mask=attention_mask,
+                    past_key_values=cache, use_cache=True)
+    return out.logits[:, -1, :], out.past_key_values
+
+
+def reparent_cache(cache, rows):
+    """Re-order the cache so that row i holds the keys and values of old row
+    rows[i]. Repeats are allowed -- that is how the single prompt row fans out
+    into a full beam on the first step -- and omissions are how a hypothesis that
+    died or finished releases its row."""
+    idx = torch.tensor(rows, dtype=torch.long, device=DEVICE)
+    if hasattr(cache, "reorder_cache"):
+        cache.reorder_cache(idx)  # transformers Cache objects reorder in place
+        return cache
+    # legacy format: one (key, value) pair of [batch, heads, seq, dim] per layer
+    return tuple(tuple(t.index_select(0, idx) for t in layer) for layer in cache)
 
 
 # compiled against the tokenizer, so each grammar can later produce a
@@ -387,7 +408,7 @@ class Hyp:
     Hypotheses are copied on every branch. Trie nodes are read-only dicts and are
     shared; the xgrammar matchers are stateful and so are never stored -- they
     are rebuilt from slot_ids on demand, a handful of accept_token calls against
-    one model forward per beam per step.
+    the one batched model forward the whole beam shares each step.
     """
     ids: list                 # prompt + generated tokens
     gen: list                 # generated tokens only -- the query
@@ -573,18 +594,33 @@ def whole_query_beam(start, max_new_tokens=160):
     can still beat the best completed one the search is provably finished.
     Together that leaves the search itself with no preference for long or short
     queries; only the penalties, one per slot, can express one.
+
+    The beam decodes as ONE batch against ONE KV cache: every live hypothesis is
+    a row, the prompt goes through the model once per query, and every later step
+    feeds a single token per row. Branching, pruning and finishing are then just a
+    reordering of the cache's rows (reparent_cache), which is only sound because
+    the search is token-synchronous -- all live rows share a length, so nothing
+    has to be padded and one attention mask covers them all.
     """
     bitmask = xgr.allocate_token_bitmask(1, config.vocab_size)
-    live, completed = [start], []
+    live, completed, cache = [start], [], None
     for _ in range(max_new_tokens):
         best_done = max((h.score for h in completed), default=float("-inf"))
-        live = [h for h in live if h.score > best_done]
-        if not live:
+        keep = [i for i, h in enumerate(live) if h.score > best_done]
+        if not keep:
             break
+        if len(keep) < len(live):  # a pruned hypothesis takes its cache row with it
+            live = [live[i] for i in keep]
+            cache = reparent_cache(cache, keep)
+        step_ids = torch.tensor(
+            [live[0].ids] if cache is None else [[h.ids[-1]] for h in live],
+            device=DEVICE)
+        # every row is the same length, so the mask is just "attend to all of it"
+        logits, cache = decoder_step(step_ids, cache, torch.ones(
+            len(live), len(live[0].ids), dtype=torch.long, device=DEVICE))
         candidates = []
-        for h in live:
-            logits = next_logits(h.ids)
-            ranking, legal = h.legal_logits(logits, bitmask)
+        for row, h in enumerate(live):
+            ranking, legal = h.legal_logits(logits[row:row + 1], bitmask)
             # renormalised over the legal set, so a forced token costs ~0 and a
             # constrained rung is not pushed into closing early to stop paying.
             # Expanded off `ranking`, scored off `legal`: the boosts pick what
@@ -595,13 +631,20 @@ def whole_query_beam(start, max_new_tokens=160):
             for val, tok in zip(top.values.tolist(), top.indices.tolist()):
                 if val == float("-inf"):
                     continue  # fewer legal tokens than BEAM_WIDTH: skip the pad
-                candidates.append(h.advance(tok, logprobs[tok].item()))
+                candidates.append((row, h.advance(tok, logprobs[tok].item())))
         if not candidates:
             break
-        candidates.sort(key=lambda h: h.score, reverse=True)
-        live = []
-        for h in candidates[:BEAM_WIDTH]:
-            (completed if h.done else live).append(h)
+        candidates.sort(key=lambda row_hyp: row_hyp[1].score, reverse=True)
+        live, rows = [], []
+        for row, h in candidates[:BEAM_WIDTH]:
+            if h.done:
+                completed.append(h)
+            else:
+                live.append(h)
+                rows.append(row)  # this beam decodes on, so it keeps a cache row
+        if not rows:
+            break
+        cache = reparent_cache(cache, rows)
     return max(completed or live, key=lambda h: h.score)
 
 
