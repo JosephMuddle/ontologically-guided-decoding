@@ -43,17 +43,24 @@ variable (prev an IRI), the matcher is primed with the glued ' <' the
 entity slot ended on, and soft ontological guidance is layered on top: the
 subject's classes are found by walking every class trie over the entity's
 tokens, relations whose effective domains those classes cover form a small
-encouragement trie, and tokens continuing one of them get RELATION_BOOST
-added to their logits.
+encouragement trie, and tokens continuing one of them are boosted when the
+beam picks which continuations to expand. The score is settled once, at the
+end of the slot: a relation that turns out not to be one of them costs
+RELATION_BOOST, however many tokens it spanned.
 
 Step 7: the object slot (idx 2) and triple chaining. The object is any
 entity or variable from the merged trie; entities inside the relation's
-effective range are encouraged via OBJECT_BOOST (variables are not: they sit
-in every class trie, so unexcluded they would be boosted too). The class
-tries are partitioned by most-specific direct type (extract_entities.py
-assigns only the direct type to class_entities.json), so a superclass trie
-does NOT contain its subclasses: the range boost walks the range class's
-trie and every subclass trie in parallel. The slot ends with the model
+effective range are encouraged via OBJECT_BOOST, again settled once at the
+end of the slot. A range says which entity an object may be, not whether it
+is an entity at all, so the boost stays out of the slot's first token -- the
+one that picks '<' or '?' -- and a variable object is neither encouraged nor
+charged. Renormalisation is why that has to be explicit: boosting only the
+'<' branch there does not leave '?' neutral, it prices it out of reach by the
+whole of OBJECT_BOOST. The class tries are partitioned by most-specific
+direct type (extract_entities.py assigns only the direct type to
+class_entities.json), so a superclass trie does NOT contain its subclasses:
+the range boost walks the range class's trie and every subclass trie in
+parallel. The slot ends with the model
 choosing ' .' (chain another triple, back to idx 0) or ' }' (close the
 query).
 """
@@ -228,8 +235,15 @@ print(f"loaded {len(CLASS_TRIES)} class tries in {time.time() - _start:.1f}s")
 # soft ontological guidance for the relation slot after an entity subject
 # ---------------------------------------------------------------------------
 
-# added to the logits of tokens that continue an ontologically sound relation;
-# the experimental knob of the soft-constraint variant (0 == pure hard
+# the price of ontological incompatibility, in nats of query score: charged
+# once on a relation whose effective domain the subject's types do NOT cover,
+# and once on an object outside the relation's effective range. The same number
+# also biases which continuations the beam expands, at every token of the slot
+# -- but only the one-off reaches the score, so the guidance is worth a fixed
+# amount rather than a multiple of it that depends on how BPE happened to split
+# the IRI. A penalty and not a credit so that a score can still only fall, which
+# is what lets whole_query_beam() retire a hypothesis for good.
+# The experimental knob of the soft-constraint variant (0 == pure hard
 # constraint)
 RELATION_BOOST = 5.0
 OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
@@ -333,15 +347,33 @@ class Hyp:
     log-prob, and the constraint state that decides what may legally come next.
 
     Scoring is the plain sum of log-probs RENORMALISED over the legal tokens,
-    with the ontological boosts included, and no length normalisation. A token
-    the constraints force therefore costs about nothing.
+    less one ontological penalty per incompatible slot, and no length
+    normalisation. A token the constraints force therefore costs about nothing.
 
-    Including the boosts makes the score a guided objective rather than a plain
-    log P(query|question): that is deliberate. Scored boost-free, a boost could
-    only change which candidates got expanded, and since a trie node usually has
-    fewer children than BEAM_WIDTH there was nothing to expand differently -- it
-    altered 2 outputs in 1000 and flipped no matches. Soft guidance has to price
-    the path to do anything at all.
+    Pricing the boosts into the score makes it a guided objective rather than a
+    plain log P(query|question): that is deliberate. Left out of the score
+    entirely, a boost could only change which candidates got expanded, and since
+    a trie node usually has fewer children than BEAM_WIDTH there was nothing to
+    expand differently -- it altered 2 outputs in 1000 and flipped no matches.
+    Soft guidance has to price the path to do anything at all.
+
+    But it has to price it ONCE. Added to the logits at every token of the slot,
+    as it was, a boost survived the renormalisation only at the steps where some
+    legal token was left unboosted, so what a compatible path actually collected
+    was BOOST times the number of such steps: 5 nats for a relation that parts
+    from its rivals in a single token, ten times that for a long object IRI that
+    stays inside its range trie all the way down. The strength of the knob was
+    therefore set by the tokenizer, and the longer an in-range object the more
+    it earned -- the length preference the search is otherwise careful not to
+    have. So the boosts now only steer which continuations get expanded
+    (legal_logits returns a separate tensor for that) and the score settles up
+    once per slot, in advance(): BOOST off a relation whose domain the subject's
+    types do not cover, BOOST off an object that ends outside the relation's
+    range. Charged that way round -- against the incompatible rather than for
+    the compatible -- a score still only falls, which is what lets the search
+    retire a hypothesis the moment it drops below a finished one. What is left
+    of the length coupling is small and explicit: a query with more triples has
+    more slots that can each be wrong once.
 
     Scoring the unmasked distribution instead looks more principled and is a
     trap: the tighter a rung constrains, the more often the model is pushed onto
@@ -359,7 +391,7 @@ class Hyp:
     """
     ids: list                 # prompt + generated tokens
     gen: list                 # generated tokens only -- the query
-    score: float              # summed unmasked log-prob
+    score: float              # renormalised log-prob - slot penalties
     mode: str                 # 'constrained' (tries + whitelist + boosts),
                               # 'tries' (the same minus the boosts) or 'grammar'
     slot: str                 # query (grammar-only) | begin | open | subject |
@@ -370,6 +402,8 @@ class Hyp:
     node: dict = None         # cursor in the merged all-entities trie
     boost_nodes: tuple = ()   # range-class trie cursors (object slot)
     boost_node: dict = None   # encouraged-relation trie cursor (relation slot)
+    encouraged: frozenset = frozenset()  # relations the subject's types allow
+    ranged: bool = False      # the relation's range is narrower than owl:Thing
     prev: str = None          # previous term, for the ontological boosts
     done: bool = False
 
@@ -394,37 +428,46 @@ class Hyp:
         return None  # constrained entity slots are trie-driven, not grammar-driven
 
     def legal_logits(self, logits, bitmask):
-        """The next-token logits with everything the constraints forbid set to
-        -inf and the ontological boosts added on top of what survives.
+        """(ranking, legal): the next-token logits with everything the
+        constraints forbid set to -inf, twice -- once with the ontological
+        boosts added on top of what survives, once without.
 
-        One tensor does both jobs. The search renormalises it over the legal
-        set, so a token the constraints force costs about nothing, and a boost
-        lowers the price of an ontologically compatible path rather than only
-        putting it on the shortlist. The boosts go in in place: an illegal token
-        is already -inf and -inf + boost is still -inf, so nothing the
-        constraints ruled out can come back through the boost."""
+        The search expands the top of `ranking` and scores what it expanded
+        against `legal`, so a boost decides which continuations are tried
+        without also inflating the score of every token it happens to touch;
+        the flat per-slot price is charged in advance() instead. The two are
+        the same tensor wherever no boost applies. The boosts go in in place:
+        an illegal token is already -inf and -inf + boost is still -inf, so
+        nothing the constraints ruled out can come back through the boost."""
         grammar = self._grammar()
         if grammar is not None:
-            ranking = logits.clone()
+            legal = logits.clone()
             self.matcher(grammar).fill_next_token_bitmask(bitmask)
-            xgr.apply_token_bitmask_inplace(ranking, bitmask.to(DEVICE))
+            xgr.apply_token_bitmask_inplace(legal, bitmask.to(DEVICE))
             if self.slot == "relation" and self.boost_node:
+                ranking = legal.clone()
                 ranking[0, list(self.boost_node)] += RELATION_BOOST
-            return ranking
+                return ranking, legal
+            return legal, legal
         if self.slot == "open":
             allowed = [GL_LT_ID, GL_QM_ID]
         else:
             allowed = [t for t in self.node if t is not None]
             if TRIE_END in self.node:
                 allowed += [GL_LT_ID] if self.slot == "subject" else [GL_DOT_ID, GL_RBRACE_ID]
-        ranking = torch.full_like(logits, float("-inf"))
-        ranking[0, allowed] = logits[0, allowed]
-        if self.slot == "object" and self.boost_nodes:
+        legal = torch.full_like(logits, float("-inf"))
+        legal[0, allowed] = logits[0, allowed]
+        # from the object's SECOND token on: the first one chooses between an
+        # entity and a variable, which the range has no opinion about, and
+        # boosting one branch of a two-way choice is not neutrality -- it is the
+        # full boost against the other
+        if self.slot == "object" and self.slot_ids and self.boost_nodes:
             boosted = {t for bn in self.boost_nodes for t in bn if t is not None}
-            boosted.discard(QM_ID)  # variables stay neutral: no range boost
             if boosted:
+                ranking = legal.clone()
                 ranking[0, list(boosted)] += OBJECT_BOOST  # illegal ones stay -inf
-        return ranking
+                return ranking, legal
+        return legal, legal
 
     def advance(self, tok, logprob):
         """The transition: a copy of this hypothesis with tok appended and the
@@ -466,11 +509,15 @@ class Hyp:
                 h.prev = (self.slot_prefix + tokenizer.decode(self.slot_ids)).strip()
                 h.slot, h.slot_ids, h.node = "relation", [], None
                 h.slot_prime, h.slot_prefix = GL_LT_ID, " <"
-                h.boost_node = (
-                    build_boost_trie(encouraged_relations(entity_types(h.prev)))
+                encouraged = (
+                    encouraged_relations(entity_types(h.prev))
                     if h.mode == "constrained" and h.prev not in ("?uri", "?x")
-                    else None
+                    else []
                 )
+                # the trie steers the beam token by token, the set prices the
+                # finished relation once
+                h.boost_node = build_boost_trie(encouraged) if encouraged else None
+                h.encouraged = frozenset(encouraged)
             else:
                 h.node = self.node[tok]
             return h
@@ -481,9 +528,12 @@ class Hyp:
                     h.done = True  # the type tail closed the query
                 else:
                     h.prev = (h.slot_prefix + tokenizer.decode(h.slot_ids)).strip()
+                    if self.encouraged and h.prev not in self.encouraged:
+                        h.score -= RELATION_BOOST  # the whole price, paid once
                     h.node = ALL_ENTITIES_TRIE
                     if h.mode == "constrained":
                         h.boost_nodes = tuple(range_tries(h.prev))
+                        h.ranged = bool(h.boost_nodes)
                     h.slot, h.slot_ids = "object", []
                     h.slot_prime, h.slot_prefix = None, ""
             else:
@@ -492,6 +542,8 @@ class Hyp:
 
         # object slot
         if tok in (GL_DOT_ID, GL_RBRACE_ID) and TRIE_END in self.node:
+            if self.ranged and not any(TRIE_END in bn for bn in self.boost_nodes):
+                h.score -= OBJECT_BOOST  # the object ended outside the range
             if tok == GL_RBRACE_ID:
                 h.done = True
             else:
@@ -499,10 +551,12 @@ class Hyp:
                 h.node, h.boost_nodes = None, ()
         else:
             h.node = self.node[tok]
-            h.boost_nodes = (
-                () if tok == QM_ID
-                else tuple(bn[tok] for bn in self.boost_nodes if tok in bn)
-            )
+            if not self.slot_ids and tok == QM_ID:
+                # the object is a variable: the relation's range has no claim on
+                # it, so it is neither walked nor charged at the end of the slot
+                h.boost_nodes, h.ranged = (), False
+            else:
+                h.boost_nodes = tuple(bn[tok] for bn in self.boost_nodes if tok in bn)
         return h
 
 
@@ -511,13 +565,14 @@ def whole_query_beam(start, max_new_tokens=160):
 
     Every live hypothesis advances exactly one token per round, so they always
     share a length and the summed log-prob (renormalised over the legal tokens,
-    boosts included) ranks them fairly -- there is nothing left for a length
-    normalisation to correct. Finished hypotheses are
-    held in a separate pool and never compete with growing ones directly: since
-    log-probs are non-positive a live score can only fall, so once no live
-    hypothesis can still beat the best completed one the search is provably
-    finished. Together that leaves the search with no preference of its own for
-    long or short queries.
+    less one flat penalty per ontologically incompatible slot) ranks them fairly
+    -- there is nothing left for a length normalisation to correct. Finished
+    hypotheses are held in a separate pool and never compete with growing ones
+    directly: since log-probs are non-positive and the ontological penalties
+    only ever subtract, a live score can only fall, so once no live hypothesis
+    can still beat the best completed one the search is provably finished.
+    Together that leaves the search itself with no preference for long or short
+    queries; only the penalties, one per slot, can express one.
     """
     bitmask = xgr.allocate_token_bitmask(1, config.vocab_size)
     live, completed = [start], []
@@ -529,12 +584,13 @@ def whole_query_beam(start, max_new_tokens=160):
         candidates = []
         for h in live:
             logits = next_logits(h.ids)
-            ranking = h.legal_logits(logits, bitmask)
+            ranking, legal = h.legal_logits(logits, bitmask)
             # renormalised over the legal set, so a forced token costs ~0 and a
             # constrained rung is not pushed into closing early to stop paying.
-            # The boosts are already folded in, so they make a compatible path
-            # genuinely cheaper rather than merely shortlisting it
-            logprobs = torch.log_softmax(ranking, dim=-1)[0]
+            # Expanded off `ranking`, scored off `legal`: the boosts pick what
+            # gets tried, and advance() charges their flat price once a slot
+            # comes out incompatible
+            logprobs = torch.log_softmax(legal, dim=-1)[0]
             top = ranking[0].topk(BEAM_WIDTH)
             for val, tok in zip(top.values.tolist(), top.indices.tolist()):
                 if val == float("-inf"):
@@ -616,8 +672,8 @@ def generate(question):
     Searched as one whole-query beam of BEAM_WIDTH rather than slot by slot, so
     an opening template or a subject entity can still be revised once the rest
     of the triple turns out implausible. Scoring sums log-probs renormalised
-    over the legal tokens with the boosts folded in; see whole_query_beam() and
-    Hyp for why."""
+    over the legal tokens and subtracts one flat penalty per incompatible slot;
+    see whole_query_beam() and Hyp for why."""
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
