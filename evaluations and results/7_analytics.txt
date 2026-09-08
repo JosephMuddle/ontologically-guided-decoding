@@ -1,0 +1,289 @@
+LC-QuAD v1.0 test -- execution evaluation
+endpoint: local Jena Fuseki, DBpedia 2016-04 core (en)  2026-09-08 11:21
+beam width: 7
+
+questions: 1000  (select: 794, count: 123, ask: 83)
+gold execution failures: 0
+
+The ablation ladder: generated - no_boosts isolates the ontological boosts,
+no_boosts - grammar_only isolates the KB vocabulary (entity tries + relation
+whitelist), grammar_only - unconstrained isolates query structure alone.
+
+CONSTRAINED (grammar + tries + ontological boosts):
+  execution failures: 0
+  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.447
+
+  exact answer match: 423/1000 (42.3%)
+    select 332/794 (41.8%)
+    count  50/123 (40.7%)
+    ask    41/83 (49.4%)
+  exact query match, canonicalised: 268/1000 (26.8%)
+    select 205/794 (25.8%)
+    count  35/123 (28.5%)
+    ask    28/83 (33.7%)
+  SELECT answer sets (n=794), macro-averaged over questions:
+    precision 0.950  recall 0.454  F1 0.449
+    both empty (produced & gold): 14
+
+NO BOOSTS (grammar + tries, no domain/range guidance):
+  execution failures: 0
+  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.445
+
+  exact answer match: 419/1000 (41.9%)
+    select 331/794 (41.7%)
+    count  49/123 (39.8%)
+    ask    39/83 (47.0%)
+  exact query match, canonicalised: 262/1000 (26.2%)
+    select 202/794 (25.4%)
+    count  33/123 (26.8%)
+    ask    27/83 (32.5%)
+  SELECT answer sets (n=794), macro-averaged over questions:
+    precision 0.952  recall 0.455  F1 0.449
+    both empty (produced & gold): 14
+
+GRAMMAR ONLY (query structure alone, free-form IRIs):
+  execution failures: 0
+  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.420
+
+  exact answer match: 392/1000 (39.2%)
+    select 303/794 (38.2%)
+    count  52/123 (42.3%)
+    ask    37/83 (44.6%)
+  exact query match, canonicalised: 254/1000 (25.4%)
+    select 192/794 (24.2%)
+    count  35/123 (28.5%)
+    ask    27/83 (32.5%)
+  SELECT answer sets (n=794), macro-averaged over questions:
+    precision 0.964  recall 0.422  F1 0.417
+    both empty (produced & gold): 15
+
+UNCONSTRAINED (raw fine-tuned model, no constraints):
+  execution failures: 0
+  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.422
+
+  exact answer match: 393/1000 (39.3%)
+    select 304/794 (38.3%)
+    count  51/123 (41.5%)
+    ask    38/83 (45.8%)
+  exact query match, canonicalised: 253/1000 (25.3%)
+    select 191/794 (24.1%)
+    count  34/123 (27.6%)
+    ask    28/83 (33.7%)
+  SELECT answer sets (n=794), macro-averaged over questions:
+    precision 0.964  recall 0.424  F1 0.419
+    both empty (produced & gold): 15
+
+SUMMARY (QALD macro F1 | exact answer | exact query):
+  generated       0.447  |    423/1000 (42.3%)  |    268/1000 (26.8%)
+  no_boosts       0.445  |    419/1000 (41.9%)  |    262/1000 (26.2%)
+  grammar_only    0.420  |    392/1000 (39.2%)  |    254/1000 (25.4%)
+  unconstrained   0.422  |    393/1000 (39.3%)  |    253/1000 (25.3%)
+
+T-box guidance on questions where the ontology has something to say
+
+Subset defined by the GOLD predicates; a predicate counts as informative when
+its effective domain or range names at least one class other than owl:Thing.
+rdf:type tails are excluded -- they carry no domain or range of their own.
+Namespace-neutral match uses the same conservative twin rule as the block
+above (only local names whitelisted in both namespaces are collapsed).
+
+The bottom subset is the control: the T-box cannot help there, so a boost
+delta of the same size on both is evidence that vacuity is not the binding
+constraint. Note the subset is defined by gold predicates while the model may
+emit others -- a proxy, not a controlled experiment.
+
+every gold predicate informative: n=342 (34.2% of 1000)
+  rung                exact query   modulo namespace     exact answer
+  generated            97 (28.4%)        141 (41.2%)      145 (42.4%)
+  no_boosts           108 (31.6%)        149 (43.6%)      156 (45.6%)
+  grammar_only        102 (29.8%)        144 (42.1%)      143 (41.8%)
+  unconstrained       102 (29.8%)        144 (42.1%)      142 (41.5%)
+  T-box guidance (generated - no_boosts): exact -11, modulo-namespace -8, answer -11
+
+at least one informative: n=599 (59.9% of 1000)
+  rung                exact query   modulo namespace     exact answer
+  generated           144 (24.0%)        214 (35.7%)      245 (40.9%)
+  no_boosts           152 (25.4%)        219 (36.6%)      253 (42.2%)
+  grammar_only        147 (24.5%)        214 (35.7%)      233 (38.9%)
+  unconstrained       147 (24.5%)        214 (35.7%)      233 (38.9%)
+  T-box guidance (generated - no_boosts): exact -8, modulo-namespace -5, answer -8
+
+none informative (control): n=401 (40.1% of 1000)
+  rung                exact query   modulo namespace     exact answer
+  generated           124 (30.9%)        153 (38.2%)      178 (44.4%)
+  no_boosts           110 (27.4%)        150 (37.4%)      166 (41.4%)
+  grammar_only        107 (26.7%)        144 (35.9%)      159 (39.7%)
+  unconstrained       106 (26.4%)        145 (36.2%)      160 (39.9%)
+  T-box guidance (generated - no_boosts): exact +14, modulo-namespace +3, answer +12
+
+Ontological compatibility of the gold query
+
+A gold query is INCOMPATIBLE when the decoder's own boosts would charge it:
+a relation whose effective domain the subject's types do not cover, or an
+object outside the relation's effective range. On those questions the boosts
+push away from gold by construction, so the two halves answer different
+questions -- does the guidance help when the benchmark agrees with the
+ontology, and how much does it cost when the benchmark does not.
+
+Types are endpoint-resolved most-specific ontology types, the same ones the
+decoder's class tries hold. Untyped entities fail the domain check here
+exactly as they do in the decoder.
+
+gold compatible:   885/1000 (88.5%)
+gold incompatible: 115/1000 (11.5%)
+    charged on domain only    27
+    charged on range only     88
+    charged on both            0
+
+==========================================================================
+GOLD ONTOLOGICALLY COMPATIBLE: n=885 (88.5% of 1000)
+==========================================================================
+
+CONSTRAINED (grammar + tries + ontological boosts):
+  execution failures: 0
+  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.475
+
+  exact answer match: 398/885 (45.0%)
+    select 310/703 (44.1%)
+    count  50/111 (45.0%)
+    ask    38/71 (53.5%)
+  exact query match, canonicalised: 257/885 (29.0%)
+    select 195/703 (27.7%)
+    count  35/111 (31.5%)
+    ask    27/71 (38.0%)
+  SELECT answer sets (n=703), macro-averaged over questions:
+    precision 0.952  recall 0.477  F1 0.473
+    both empty (produced & gold): 12
+
+NO BOOSTS (grammar + tries, no domain/range guidance):
+  execution failures: 0
+  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.455
+
+  exact answer match: 380/885 (42.9%)
+    select 299/703 (42.5%)
+    count  47/111 (42.3%)
+    ask    34/71 (47.9%)
+  exact query match, canonicalised: 238/885 (26.9%)
+    select 183/703 (26.0%)
+    count  32/111 (28.8%)
+    ask    23/71 (32.4%)
+  SELECT answer sets (n=703), macro-averaged over questions:
+    precision 0.953  recall 0.463  F1 0.458
+    both empty (produced & gold): 12
+
+GRAMMAR ONLY (query structure alone, free-form IRIs):
+  execution failures: 0
+  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.426
+
+  exact answer match: 352/885 (39.8%)
+    select 271/703 (38.5%)
+    count  48/111 (43.2%)
+    ask    33/71 (46.5%)
+  exact query match, canonicalised: 227/885 (25.6%)
+    select 171/703 (24.3%)
+    count  32/111 (28.8%)
+    ask    24/71 (33.8%)
+  SELECT answer sets (n=703), macro-averaged over questions:
+    precision 0.967  recall 0.425  F1 0.421
+    both empty (produced & gold): 13
+
+UNCONSTRAINED (raw fine-tuned model, no constraints):
+  execution failures: 0
+  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.427
+
+  exact answer match: 352/885 (39.8%)
+    select 270/703 (38.4%)
+    count  48/111 (43.2%)
+    ask    34/71 (47.9%)
+  exact query match, canonicalised: 225/885 (25.4%)
+    select 168/703 (23.9%)
+    count  32/111 (28.8%)
+    ask    25/71 (35.2%)
+  SELECT answer sets (n=703), macro-averaged over questions:
+    precision 0.966  recall 0.424  F1 0.421
+    both empty (produced & gold): 13
+
+SUMMARY on this subset (QALD macro F1 | exact answer | exact query):
+  generated       0.475  |     398/885 (45.0%)  |     257/885 (29.0%)
+  no_boosts       0.455  |     380/885 (42.9%)  |     238/885 (26.9%)
+  grammar_only    0.426  |     352/885 (39.8%)  |     227/885 (25.6%)
+  unconstrained   0.427  |     352/885 (39.8%)  |     225/885 (25.4%)
+
+  T-box guidance (generated - no_boosts): answer +18, query +19
+
+==========================================================================
+GOLD ONTOLOGICALLY INCOMPATIBLE: n=115 (11.5% of 1000)
+==========================================================================
+
+CONSTRAINED (grammar + tries + ontological boosts):
+  execution failures: 0
+  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.235
+
+  exact answer match: 25/115 (21.7%)
+    select 22/91 (24.2%)
+    count  0/12 (0.0%)
+    ask    3/12 (25.0%)
+  exact query match, canonicalised: 11/115 (9.6%)
+    select 10/91 (11.0%)
+    count  0/12 (0.0%)
+    ask    1/12 (8.3%)
+  SELECT answer sets (n=91), macro-averaged over questions:
+    precision 0.933  recall 0.272  F1 0.263
+    both empty (produced & gold): 2
+
+NO BOOSTS (grammar + tries, no domain/range guidance):
+  execution failures: 0
+  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.361
+
+  exact answer match: 39/115 (33.9%)
+    select 32/91 (35.2%)
+    count  2/12 (16.7%)
+    ask    5/12 (41.7%)
+  exact query match, canonicalised: 24/115 (20.9%)
+    select 19/91 (20.9%)
+    count  1/12 (8.3%)
+    ask    4/12 (33.3%)
+  SELECT answer sets (n=91), macro-averaged over questions:
+    precision 0.945  recall 0.387  F1 0.379
+    both empty (produced & gold): 2
+
+GRAMMAR ONLY (query structure alone, free-form IRIs):
+  execution failures: 0
+  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.376
+
+  exact answer match: 40/115 (34.8%)
+    select 32/91 (35.2%)
+    count  4/12 (33.3%)
+    ask    4/12 (33.3%)
+  exact query match, canonicalised: 27/115 (23.5%)
+    select 21/91 (23.1%)
+    count  3/12 (25.0%)
+    ask    3/12 (25.0%)
+  SELECT answer sets (n=91), macro-averaged over questions:
+    precision 0.946  recall 0.403  F1 0.387
+    both empty (produced & gold): 2
+
+UNCONSTRAINED (raw fine-tuned model, no constraints):
+  execution failures: 0
+  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.385
+
+  exact answer match: 41/115 (35.7%)
+    select 34/91 (37.4%)
+    count  3/12 (25.0%)
+    ask    4/12 (33.3%)
+  exact query match, canonicalised: 28/115 (24.3%)
+    select 23/91 (25.3%)
+    count  2/12 (16.7%)
+    ask    3/12 (25.0%)
+  SELECT answer sets (n=91), macro-averaged over questions:
+    precision 0.946  recall 0.425  F1 0.409
+    both empty (produced & gold): 2
+
+SUMMARY on this subset (QALD macro F1 | exact answer | exact query):
+  generated       0.235  |      25/115 (21.7%)  |       11/115 (9.6%)
+  no_boosts       0.361  |      39/115 (33.9%)  |      24/115 (20.9%)
+  grammar_only    0.376  |      40/115 (34.8%)  |      27/115 (23.5%)
+  unconstrained   0.385  |      41/115 (35.7%)  |      28/115 (24.3%)
+
+  T-box guidance (generated - no_boosts): answer -14, query -13
+
