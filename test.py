@@ -5,18 +5,22 @@ generator, canonicalize both the produced query and the gold query, and count
 exact string matches. Two metrics are reported: strict exact match, and match
 "modulo namespace twins", where predicates whitelisted in both the ontology/
 and property/ namespaces (e.g. architect) are compared namespace-neutrally.
-Every question is decoded once per rung of the ablation ladder -- the full
-constraint stack, the same minus the ontological boosts, structure-only, and
-the raw fine-tuned weights with no constraints at all -- so one run produces
-every column the comparison needs. output.json carries the gold query and all
-four outputs, canonical form only: canonicalisation is whitespace-level and
-loses nothing the evaluation uses, and keeping one spelling per query stops the
-raw and canonical copies drifting apart. Records are rewritten every CHECKPOINT
-questions so a crash does not lose the run, and re-read on startup: a run cut
-short by a Colab timeout resumes at the question after the last record instead
-of starting over. --systems narrows the run to particular rungs and --redo
-clears them first, so one rung can be regenerated in place after a decoder
-change without touching the other three. Delete output.json to start over.
+Every question is decoded once per rung of the ablation ladder -- the hard
+constraints under each of three kinds of ontological guidance (positive
+domain/range coverage, negative class disjointness, and both at once), the same
+hard constraints with no guidance, structure-only, and the raw fine-tuned weights
+with no constraints at all -- so one run produces every column the comparison
+needs. output.json carries the gold query and all six outputs, canonical form
+only: canonicalisation is whitespace-level and loses nothing the evaluation
+uses, and keeping one spelling per query stops the raw and canonical copies
+drifting apart. Records are rewritten every CHECKPOINT questions so a crash does
+not lose the run, and re-read on startup: a run cut short by a Colab timeout
+resumes at the question after the last record instead of starting over.
+--systems narrows the run to particular rungs and --redo clears them first, so
+one rung can be regenerated in place after a decoder change without touching
+the others. Delete output.json to start over. Files written before the guidance
+rungs were split hold the positive rung under its old name, "generated"; it is
+renamed on load, so an old run gains the new rungs with --systems negative both.
 """
 import argparse
 import json
@@ -36,9 +40,9 @@ if __name__ == "__main__":
                           "constrained rung, and num_beams for the unconstrained "
                           "baseline (default 4; 1 is greedy)")
     _ap.add_argument("--systems", nargs="+", metavar="NAME", default=None,
-                     help="only run these rungs (generated, no_boosts, grammar_only, "
-                          "unconstrained). Rungs already stored in output.json are "
-                          "kept as they are; default is all four")
+                     help="only run these rungs (positive, negative, both, no_boosts, "
+                          "grammar_only, unconstrained). Rungs already stored in "
+                          "output.json are kept as they are; default is all six")
     _ap.add_argument("--redo", action="store_true",
                      help="clear the selected rungs from output.json first, so they "
                           "are regenerated even where an answer is already stored")
@@ -46,21 +50,24 @@ if __name__ == "__main__":
     if ARGS.beams is not None:
         os.environ["BEAM_WIDTH"] = str(ARGS.beams)
 
-from type_constrained_generation import (BEAM_WIDTH, generate, generate_grammar_only,
-                                         generate_no_boosts, generate_unconstrained)
+from type_constrained_generation import (BEAM_WIDTH, generate_both, generate_grammar_only,
+                                         generate_negative, generate_no_boosts,
+                                         generate_positive, generate_unconstrained)
 
 DATA_FILE = Path(__file__).parent / "lcquad_data" / "test-data.json"
 WHITELIST_FILE = Path(__file__).parent / "lcquad_data" / "predicates.txt"
 OUT_FILE = Path(__file__).parent / "output.json"
 CHECKPOINT = 10  # questions between progress prints / output.json rewrites
 
-# The ablation ladder, strongest first. Each entry is (record prefix, decoder);
-# the full system keeps the legacy "generated" prefix so existing tooling still
-# finds it. generate() minus generate_no_boosts() isolates the ontological
-# boosts; generate_no_boosts() minus generate_grammar_only() isolates the KB
-# vocabulary (entity tries + relation whitelist) from bare structure.
+# The ablation ladder, guided rungs first. Each entry is (record prefix,
+# decoder). Each guided rung minus no_boosts isolates one kind of ontological
+# guidance -- positive domain/range coverage, negative class disjointness, or
+# both together -- and no_boosts minus grammar_only isolates the KB vocabulary
+# (entity tries + relation whitelist) from bare structure.
 SYSTEMS = (
-    ("generated", generate),
+    ("positive", generate_positive),
+    ("negative", generate_negative),
+    ("both", generate_both),
     ("no_boosts", generate_no_boosts),
     ("grammar_only", generate_grammar_only),
     ("unconstrained", generate_unconstrained),
@@ -145,13 +152,26 @@ def main():
             f"{OUT_FILE.name} does not line up with {DATA_FILE.name} at record {last}"
         )
 
+    # files from before the guidance rungs were split hold the positive rung as
+    # "generated": the same rung under its old name, so rename it rather than rerun
+    renamed = 0
+    for rec in results:
+        if "generated_canonical" in rec and "positive_canonical" not in rec:
+            for key in [k for k in rec if k.startswith("generated_")]:
+                rec["positive_" + key[len("generated_"):]] = rec.pop(key)
+            renamed += 1
+    if renamed:
+        OUT_FILE.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        print(f"renamed the legacy 'generated' rung to 'positive' on {renamed} records",
+              flush=True)
+
     if ARGS and ARGS.redo:
         cleared = 0
         for rec in results:
             for name, _ in run_systems:
                 cleared += rec.pop(f"{name}_canonical", None) is not None
                 rec.pop(f"{name}_match", None)
-                if name == "generated":
+                if name == "positive":
                     rec.pop("match_modulo_twins", None)
         print(f"--redo: cleared {cleared} stored answers for {', '.join(chosen)}", flush=True)
 
@@ -181,8 +201,9 @@ def main():
             produced_c = canonicalize(produced)
             record[f"{name}_canonical"] = produced_c
             record[f"{name}_match"] = produced_c == gold_c
-            if name == "generated":
-                # the twin-neutral variant is only reported for the full system
+            if name == "positive":
+                # the twin-neutral variant is recorded for one rung only, the one it
+                # has always been recorded for; the eval notebook recomputes it for all
                 record["match_modulo_twins"] = (canonicalize_twins(produced)
                                                 == canonicalize_twins(item["sparql_query"]))
         if k % CHECKPOINT == 0:
