@@ -1,7 +1,10 @@
 """Counterfactual 1-hop questions from LC-QuAD (technical_description.md).
 
-Step 1  regex-select every test query whose WHERE clause holds exactly one
-        triple, and write them to "lcquad 1 hop.json".
+Step 1  regex-select every SELECT test query whose WHERE clause holds exactly
+        one triple, and write them to "lcquad 1 hop.json". ASK queries are left
+        out: SPARKLE's decoder only checks that each entity and relation of an
+        ASK query exists, so an ASK counterfactual is as reachable for SPARKLE
+        as for us, and cannot tell the two apart.
 Step 2  replace one slot of each -- the subject only, as SWAP_SLOTS is set, so
         predicate and object stay as they are -- with another term that occurs
         in the test data, keeping the predicate's domain and/or range under the
@@ -52,10 +55,10 @@ SLOT_NAMES = ("subject", "predicate", "object")
 
 # a triple term: a bracketed IRI or a variable
 TERM = r"(<[^>]*>|\?\w+)"
-# a whole query of one triple, under any of the three LC-QuAD 1-hop heads:
-# SELECT ?uri, SELECT COUNT(?uri) or ASK
+# a whole query of one triple, under either LC-QuAD 1-hop SELECT head:
+# SELECT ?uri or SELECT COUNT(?uri)
 ONE_TRIPLE_QUERY = re.compile(
-    r"^\s*(?:SELECT\s+DISTINCT\s+(?:COUNT\(\s*\?uri\s*\)|\?uri)|ASK)\s+WHERE\s*\{\s*"
+    r"^\s*SELECT\s+DISTINCT\s+(?:COUNT\(\s*\?uri\s*\)|\?uri)\s+WHERE\s*\{\s*"
     + TERM + r"\s+" + TERM + r"\s+" + TERM + r"\s*\.?\s*\}\s*$",
     re.IGNORECASE,
 )
