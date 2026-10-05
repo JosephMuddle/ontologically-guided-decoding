@@ -1,0 +1,128 @@
+[
+  {
+    "_id": "3874",
+    "corrected_question": " Giuseppe Bertello and Pietro Parolin are leaders of which place ?",
+    "intermediary_question": "Whose <leaders> are <Giuseppe Bertello> and <Pietro Parolin>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?uri <http://dbpedia.org/ontology/leader> <http://dbpedia.org/resource/Giuseppe_Bertello> . ?uri <http://dbpedia.org/ontology/leader> <http://dbpedia.org/resource/Pietro_Parolin> . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Place>}",
+    "sparql_template_id": 307
+  },
+  {
+    "_id": "3325",
+    "corrected_question": "Which city is known for the people working in the western penn hospital?",
+    "intermediary_question": "What is the <known for> of the <medician> whose <work institutions> is <Western Pennsylvania Hospital> ?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/property/workInstitutions> <http://dbpedia.org/resource/Western_Pennsylvania_Hospital> . ?x <http://dbpedia.org/ontology/knownFor> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "4332",
+    "corrected_question": "Cologny and Lancy are the neighboring municipalities of which place ?",
+    "intermediary_question": "What is the <settlement> whose <neighboring municipalitiess> are <Cologny> and <Lancy>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?uri <http://dbpedia.org/property/neighboringMunicipalities> <http://dbpedia.org/resource/Cologny> . ?uri <http://dbpedia.org/property/neighboringMunicipalities> <http://dbpedia.org/resource/Lancy> . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Place>}",
+    "sparql_template_id": 307
+  },
+  {
+    "_id": "2739",
+    "corrected_question": "What is the political party of the person succeeded by A.K. Singh?",
+    "intermediary_question": "What is the <party> of the <governor> whose <successor> is <A. K. Singh> ?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/property/successor> <http://dbpedia.org/resource/A._K._Singh> . ?x <http://dbpedia.org/property/party> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "4007",
+    "corrected_question": "People in the royal Thai army follow which religion?",
+    "intermediary_question": "What is the <faith> of the <office holders> whose <branch> is <Royal Thai Army>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/property/branch> <http://dbpedia.org/resource/Royal_Thai_Army> . ?x <http://dbpedia.org/ontology/religion> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "2180",
+    "corrected_question": "For a position in which institution were both Jack Ryan and Robert sarvis both appointed?",
+    "intermediary_question": "What is the <nominee> of the <Jack Ryan (politician)> and <Robert Sarvis>",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Jack_Ryan_(politician)> <http://dbpedia.org/ontology/nominee> ?uri. <http://dbpedia.org/resource/Robert_Sarvis> <http://dbpedia.org/ontology/nominee> ?uri . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Organisation>}",
+    "sparql_template_id": 315
+  },
+  {
+    "_id": "4535",
+    "corrected_question": "List sports managers who managed Middlesbrough F.C. and England national under-21 football team?",
+    "intermediary_question": "What is the <soccer manager> whose <manager club> is <Middlesbrough F.C.> and <managerclubs> is <England national under-21 football team>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE {?uri <http://dbpedia.org/ontology/managerClub> <http://dbpedia.org/resource/Middlesbrough_F.C.> . ?uri <http://dbpedia.org/property/managerclubs> <http://dbpedia.org/resource/England_national_under-21_football_team>  . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/SportsManager>}",
+    "sparql_template_id": 308
+  },
+  {
+    "_id": "4586",
+    "corrected_question": "Who are the players whose current clubs have Ferran Soriano as chairman?",
+    "intermediary_question": "What are the <soccer players> whose <currentclub>'s <chairman> is <Ferran Soriano>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/property/chairman> <http://dbpedia.org/resource/Ferran_Soriano> . ?uri <http://dbpedia.org/property/currentclub> ?x  . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 306
+  },
+  {
+    "_id": "1827",
+    "corrected_question": "List the people with final resting place as Plymouth, Vermont and has Samuel W. McCall as predecessor?",
+    "intermediary_question": "What is the <office holder> whose <resting place> is <Plymouth, Vermont> and <predecessor> is <Samuel W. McCall>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE {?uri <http://dbpedia.org/ontology/restingPlace> <http://dbpedia.org/resource/Plymouth,_Vermont> . ?uri <http://dbpedia.org/property/predecessor> <http://dbpedia.org/resource/Samuel_W._McCall>  . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 308
+  },
+  {
+    "_id": "2681",
+    "corrected_question": "Which university with athletics department in NCAA Division I Football Bowl Subdivision has nickname Tulane Green Wave ?",
+    "intermediary_question": "What is the <river> whose <mouth mountain> is <St. Louis> and <right tributary> is <Madison River>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE {?uri <http://dbpedia.org/ontology/mouthMountain> <http://dbpedia.org/resource/St._Louis> . ?uri <http://dbpedia.org/ontology/rightTributary> <http://dbpedia.org/resource/Madison_River>  . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/University>}",
+    "sparql_template_id": 308
+  },
+  {
+    "_id": "3730",
+    "corrected_question": "Horses sired by Karinga Bay have participated in which races?",
+    "intermediary_question": "List the <race> of the <race horses> whose <sire> is <Karinga  Bay>>.",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/ontology/sire> <http://dbpedia.org/resource/Karinga_Bay> . ?x <http://dbpedia.org/property/race> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Horse>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "971",
+    "corrected_question": "Name the people whose academic advisor has also mentored the thesis of Alexius Meinong?",
+    "intermediary_question": "What is the <scientist> whose <academic advisor>'s <doctoral students> is <Alexius Meinong>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/property/doctoralStudents> <http://dbpedia.org/resource/Alexius_Meinong> . ?uri <http://dbpedia.org/ontology/academicAdvisor> ?x  . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 306
+  },
+  {
+    "_id": "2733",
+    "corrected_question": "Which religion do the people follow, whose constituency is Jadavpur?",
+    "intermediary_question": "What is the <denomination> of the <office holder> whose <constituency> is <Jadavpur (Lok Sabha constituency)> ?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/property/constituency> <http://dbpedia.org/resource/Jadavpur_(Lok_Sabha_constituency)> . ?x <http://dbpedia.org/property/religion> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "1816",
+    "corrected_question": "Where did the athlete start his career, who did his highschool in Red Lion Area School District?",
+    "intermediary_question": "What is the <debutteam> of the <gridiron football player> whose <highschool> is <Red Lion Area School District> ?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/ontology/highschool> <http://dbpedia.org/resource/Red_Lion_Area_School_District> . ?x <http://dbpedia.org/property/debutteam> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Athlete>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "954",
+    "corrected_question": "In which team was the person drafted who has studied at the Worcester college, Oxford?",
+    "intermediary_question": "What is the <draft team> of the <office holder> whose <alma mater> is <Worcester College, Oxford> ?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/ontology/almaMater> <http://dbpedia.org/resource/Worcester_College,_Oxford> . ?x <http://dbpedia.org/property/draftTeam> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 305
+  },
+  {
+    "_id": "2200",
+    "corrected_question": "What famous politician died in the Petersen House?",
+    "intermediary_question": "Who is the <office holder> whose <death place> is <Petersen House>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE {?uri <http://dbpedia.org/property/deathPlace> <http://dbpedia.org/resource/Petersen_House>  . ?uri <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 301
+  },
+  {
+    "_id": "4779",
+    "corrected_question": "From which countries are the people from who are an academic authority of the Western pygmy blue species?",
+    "intermediary_question": "What is the <citizenship> of the <entomologist> who is the <binomial authority> of <Western pygmy blue> ?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Western_pygmy_blue> <http://dbpedia.org/ontology/binomialAuthority> ?x . ?x <http://dbpedia.org/ontology/citizenship> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Person>}",
+    "sparql_template_id": 303
+  },
+  {
+    "_id": "2729",
+    "corrected_question": "Horses grandsired by Sundridge  have won which awards?",
+    "intermediary_question": "What is the <honours> of the <race horses> whose <grandsire> is <Sundridge (horse)>>?",
+    "sparql_query": "SELECT DISTINCT ?uri WHERE { ?x <http://dbpedia.org/ontology/grandsire> <http://dbpedia.org/resource/Sundridge_(horse)> . ?x <http://dbpedia.org/ontology/honours> ?uri  . ?x <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://dbpedia.org/ontology/Horse>}",
+    "sparql_template_id": 305
+  }
+]
