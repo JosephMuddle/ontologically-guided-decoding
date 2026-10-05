@@ -4,6 +4,10 @@
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Roberto_Clemente_Bridge> <http://dbpedia.org/ontology/routeEnd> ?uri } "
   },
   {
+    "question": "Is The Bahamas the archipelago of Tahiti?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Tahiti> <http://dbpedia.org/ontology/archipelago> <http://dbpedia.org/resource/The_Bahamas> }"
+  },
+  {
     "question": "What is the nearest city of Birmingham and Oxford Junction Railway ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Birmingham_and_Oxford_Junction_Railway> <http://dbpedia.org/ontology/nearestCity> ?uri } "
   },
@@ -16,6 +20,10 @@
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Demis_Roussos> <http://dbpedia.org/ontology/training> ?uri } "
   },
   {
+    "question": "Is Western (genre) the literary genre of Tales of Suspense?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Tales_of_Suspense> <http://dbpedia.org/ontology/literaryGenre> <http://dbpedia.org/resource/Western_(genre)> }"
+  },
+  {
     "question": "What is the debut team of Aishath Saffa ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Aishath_Saffa> <http://dbpedia.org/ontology/debutTeam> ?uri } "
   },
@@ -24,8 +32,40 @@
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Class_(2016_TV_series)> <http://dbpedia.org/ontology/narrator> ?uri } "
   },
   {
+    "question": "Is Dan River (Middle East) the left tributary of Krapanski Potok?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Krapanski_Potok> <http://dbpedia.org/ontology/leftTributary> <http://dbpedia.org/resource/Dan_River_(Middle_East)> }"
+  },
+  {
+    "question": "Is Amharic the official language of Ronda?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Ronda> <http://dbpedia.org/ontology/officialLanguage> <http://dbpedia.org/resource/Amharic> }"
+  },
+  {
+    "question": "Is Buddhism the literary genre of National Geographic (magazine)?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/National_Geographic_(magazine)> <http://dbpedia.org/ontology/literaryGenre> <http://dbpedia.org/resource/Buddhism> }"
+  },
+  {
+    "question": "Is Seattle the hub airport of Ford Air Transport Service?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Ford_Air_Transport_Service> <http://dbpedia.org/ontology/hubAirport> <http://dbpedia.org/resource/Seattle> }"
+  },
+  {
+    "question": "Is Queen Latifah the musical artist of Same Song (Digital Underground song)?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Same_Song_(Digital_Underground_song)> <http://dbpedia.org/ontology/musicalArtist> <http://dbpedia.org/resource/Queen_Latifah> }"
+  },
+  {
+    "question": "Is Annie Leibovitz the cover artist of PlayN?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/PlayN> <http://dbpedia.org/ontology/coverArtist> <http://dbpedia.org/resource/Annie_Leibovitz> }"
+  },
+  {
+    "question": "Is Maria Sharapova the silver medalist of Dubai World Cup?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Dubai_World_Cup> <http://dbpedia.org/ontology/silverMedalist> <http://dbpedia.org/resource/Maria_Sharapova> }"
+  },
+  {
     "question": "What is the time zone of Saint Lawrence River ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Saint_Lawrence_River> <http://dbpedia.org/ontology/timeZone> ?uri } "
+  },
+  {
+    "question": "Is Charles Drummond Ellis the doctoral student of Piotr Gliński?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Piotr_Gliński> <http://dbpedia.org/ontology/doctoralStudent> <http://dbpedia.org/resource/Charles_Drummond_Ellis> }"
   },
   {
     "question": "Who is the president of Teperberg 1870 ?",
@@ -40,8 +80,20 @@
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Raša_(river)> <http://dbpedia.org/ontology/riverMouth> ?uri } "
   },
   {
+    "question": "Is Morrissey the former band member of Nice & Smooth?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Nice_&_Smooth> <http://dbpedia.org/ontology/formerBandMember> <http://dbpedia.org/resource/Morrissey> }"
+  },
+  {
+    "question": "Is Columbia University the university of Gerard Piqué?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Gerard_Piqué> <http://dbpedia.org/ontology/university> <http://dbpedia.org/resource/Columbia_University> }"
+  },
+  {
     "question": "What is the largest city of Rishikesh ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Rishikesh> <http://dbpedia.org/ontology/largestCity> ?uri } "
+  },
+  {
+    "question": "Is Andrew Lincoln the narrator of 99 (2009 film)?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/99_(2009_film)> <http://dbpedia.org/ontology/narrator> <http://dbpedia.org/resource/Andrew_Lincoln> }"
   },
   {
     "question": "What is the alma mater of Jim Harris (entrepreneur) ?",
@@ -54,6 +106,22 @@
   {
     "question": "What is the programme format of Comedy Central ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Comedy_Central> <http://dbpedia.org/ontology/programmeFormat> ?uri } "
+  },
+  {
+    "question": "Is Essex the ceremonial county of Russia?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Russia> <http://dbpedia.org/ontology/ceremonialCounty> <http://dbpedia.org/resource/Essex> }"
+  },
+  {
+    "question": "Is Chordate the phylum of Spaghetti squash?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Spaghetti_squash> <http://dbpedia.org/ontology/phylum> <http://dbpedia.org/resource/Chordate> }"
+  },
+  {
+    "question": "Is Henry Knox the notable commander of United States Navy?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/United_States_Navy> <http://dbpedia.org/ontology/notableCommander> <http://dbpedia.org/resource/Henry_Knox> }"
+  },
+  {
+    "question": "Is Coffee the industry of EMI?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/EMI> <http://dbpedia.org/ontology/industry> <http://dbpedia.org/resource/Coffee> }"
   },
   {
     "question": "What is the field of Elton John ?",
@@ -72,6 +140,10 @@
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Riley_Reid> <http://dbpedia.org/ontology/citizenship> ?uri } "
   },
   {
+    "question": "Is Brazilian jiu-jitsu the trainer of Maria Sharapova?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Maria_Sharapova> <http://dbpedia.org/ontology/trainer> <http://dbpedia.org/resource/Brazilian_jiu-jitsu> }"
+  },
+  {
     "question": "What is the automobile platform of Hyundai Lavita ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Hyundai_Lavita> <http://dbpedia.org/ontology/automobilePlatform> ?uri } "
   },
@@ -80,12 +152,28 @@
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Kwai_Chang_Caine> <http://dbpedia.org/ontology/parent> ?uri } "
   },
   {
+    "question": "Is Sony the distributing label of ATO Records?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/ATO_Records> <http://dbpedia.org/ontology/distributingLabel> <http://dbpedia.org/resource/Sony> }"
+  },
+  {
+    "question": "Is Festival Records the distributing label of Motown?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Motown> <http://dbpedia.org/ontology/distributingLabel> <http://dbpedia.org/resource/Festival_Records> }"
+  },
+  {
     "question": "What is the parent organisation of LPGA ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/LPGA> <http://dbpedia.org/ontology/parentOrganisation> ?uri } "
   },
   {
     "question": "What is the ideology of Denver Broncos ?",
     "sparql_query": " SELECT DISTINCT ?uri WHERE { <http://dbpedia.org/resource/Denver_Broncos> <http://dbpedia.org/ontology/ideology> ?uri } "
+  },
+  {
+    "question": "Is Christchurch the largest city of Pong Pha?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Pong_Pha> <http://dbpedia.org/ontology/largestCity> <http://dbpedia.org/resource/Christchurch> }"
+  },
+  {
+    "question": "Is Latin the official language of Bend, Oregon?",
+    "sparql_query": "ASK WHERE { <http://dbpedia.org/resource/Bend,_Oregon> <http://dbpedia.org/ontology/officialLanguage> <http://dbpedia.org/resource/Latin> }"
   },
   {
     "question": "What is the resting place of Marika Gombitová ?",
