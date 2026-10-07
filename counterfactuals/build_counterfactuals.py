@@ -2,24 +2,25 @@
 
 Step 1  regex-select every test query whose WHERE clause holds exactly one
         triple, and write them to "lcquad 1 hop.json".
-Step 2  replace one slot of each -- the subject only, as SWAP_SLOTS is set, so
-        predicate and object stay as they are -- with another term that occurs
-        in the test data, keeping the predicate's domain and/or range under the
-        extracted T-box. A replacement is kept only when the local DBpedia
-        endpoint holds no triple for it; otherwise the next one is tried.
-        Samples are taken in file order until 100 counterfactuals are made.
-        A sample whose subject is the answer variable has nothing to swap.
-Step 3  rewrite each <...> span of the sample's intermediary_question with the
-        standardised name of the identifier now in that slot of the query, then
-        drop the angle brackets.
+Step 2  replace the subject of each -- predicate and object stay as they are --
+        with another entity that occurs in the test data and falls in the
+        predicate's domain under the extracted T-box. A replacement is kept
+        only when the local DBpedia endpoint holds no triple for it; otherwise
+        the next one is tried. Samples are taken in file order until 100
+        counterfactuals are made. A sample whose subject is the answer variable
+        has nothing to swap.
+Step 3  rewrite the subject's mention in the sample's intermediary_question
+        with the name of the entity now in its place; the predicate and object
+        mentions keep the question's own wording, with the angle brackets
+        dropped.
 Step 4  write the {question, sparql_query} pairs to "counterfactual 1 hops.json".
 
 T-box semantics are the decoder's, as dbpedia_endpoint_local.ipynb mirrors them:
 a subject satisfies a domain when one of its types IS that class or a subclass of
-it, an object satisfies a range likewise, and owl:Thing constrains nothing. So
-every replacement must rest on an explicit domain or range -- one naming a class
-other than owl:Thing. The owl:Thing fallback (every property/ predicate, and
-dbpedia.org/ontology ones declaring nothing) would admit any term at all.
+it, and owl:Thing constrains nothing. So every replacement must rest on an
+explicit domain -- one naming a class other than owl:Thing. The owl:Thing
+fallback (every property/ predicate, and dbpedia.org/ontology ones declaring
+nothing) would admit any term at all.
 
 Step 2 needs the local Fuseki endpoint running (the Fuseki cell of
 evaluations and results/dbpedia_endpoint_local.ipynb).
@@ -31,7 +32,6 @@ import random
 import re
 import urllib.parse
 import urllib.request
-from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -43,23 +43,21 @@ COUNTERFACTUAL_FILE = HERE / "counterfactual 1 hops.json"
 ENDPOINT = "http://localhost:3030/dbpedia/sparql"
 COUNTERFACTUALS_WANTED = 100
 SEED = 0
-# which triple slots may be replaced: 0 subject, 1 predicate, 2 object
-SWAP_SLOTS = (0,)
 
 OWL_THING = "<http://www.w3.org/2002/07/owl#Thing>"
-RDF_TYPE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
-SLOT_NAMES = ("subject", "predicate", "object")
 
 # a triple term: a bracketed IRI or a variable
 TERM = r"(<[^>]*>|\?\w+)"
-# a whole query of one triple, under any of the three LC-QuAD 1-hop heads:
-# SELECT ?uri, SELECT COUNT(?uri) or ASK
+# a whole query of one triple, under either of the two SELECT heads:
+# SELECT ?uri or SELECT COUNT(?uri). ASK queries are out: SPARKLE's decoder
+# only checks that an ASK query's entity and relation exist, so an ASK
+# counterfactual is as reachable for it as for us and cannot tell the two apart
 ONE_TRIPLE_QUERY = re.compile(
-    r"^\s*(?:SELECT\s+DISTINCT\s+(?:COUNT\(\s*\?uri\s*\)|\?uri)|ASK)\s+WHERE\s*\{\s*"
+    r"^\s*SELECT\s+DISTINCT\s+(?:COUNT\(\s*\?uri\s*\)|\?uri)\s+WHERE\s*\{\s*"
     + TERM + r"\s+" + TERM + r"\s+" + TERM + r"\s*\.?\s*\}\s*$",
     re.IGNORECASE,
 )
-# every triple of any query, for collecting the replacement pools
+# every triple of any query, for collecting the replacement pool
 ANY_TRIPLE = re.compile(TERM + r"\s+" + TERM + r"\s+" + TERM)
 BRACKETED = re.compile(r"<([^<>]*)>")
 
@@ -81,17 +79,6 @@ def entity_name(iri):
     return " ".join(local.replace("_", " ").split())
 
 
-def predicate_name(iri):
-    """<.../ontology/parentOrganisation> -> "parent organisation"."""
-    local = iri[1:-1].rsplit("/", 1)[1]
-    words = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", " ", local)
-    return " ".join(re.sub(r"[\W_]+", " ", words).split()).lower()
-
-
-def standard_name(term):
-    return entity_name(term) if is_entity(term) else predicate_name(term)
-
-
 def ascii_fold(text):
     """What LC-QuAD's question text keeps of a name: the questions drop every
     non-ASCII character, so Trần_Việt_Hương is asked about as "Trn Vit Hng".
@@ -99,41 +86,27 @@ def ascii_fold(text):
     return " ".join(text.encode("ascii", "ignore").decode().split()).lower()
 
 
-def locate(question, terms):
-    """slot -> (start, end) of each identifier's mention in the question.
+def locate_subject(question, subject):
+    """(start, end) of the subject's mention in the question, or None.
 
-    Entities are found by name: as a <...> span when bracketed, as bare text
-    otherwise (template 2 questions leave the entity unbracketed). The predicate
-    is the last <...> span left over -- the only other one, in the "What is the
-    <class> whose <predicate> is <entity>" forms, is the answer class, which
-    comes first and names nothing in the query. A slot that cannot be found is
-    left out, and is then never replaced, since its question could not follow."""
-    spans, claimed = {}, set()
-    brackets = [(m.start(), m.end(), m.group(1)) for m in BRACKETED.finditer(question)]
-    for slot in (0, 2):
-        if not is_entity(terms[slot]):
-            continue
-        name = ascii_fold(entity_name(terms[slot]))
-        hit = next((b for b in brackets if b not in claimed and ascii_fold(b[2]) == name), None)
-        if hit:
-            claimed.add(hit)
-            spans[slot] = hit[:2]
-            continue
-        bare = re.search(r"\s+".join(map(re.escape, name.split())), question, re.IGNORECASE)
-        if bare:
-            spans[slot] = bare.span()
-    left = [b for b in brackets if b not in claimed]
-    if left:
-        spans[1] = left[-1][:2]
-    return spans
+    Found by name: as a <...> span when bracketed, as bare text otherwise
+    (template 2 questions leave the entity unbracketed). A sample whose subject
+    mention cannot be found is skipped, since its question could not follow."""
+    if not is_entity(subject):
+        return None
+    name = ascii_fold(entity_name(subject))
+    for m in BRACKETED.finditer(question):
+        if ascii_fold(m.group(1)) == name:
+            return m.span()
+    bare = re.search(r"\s+".join(map(re.escape, name.split())), question, re.IGNORECASE)
+    return bare.span() if bare else None
 
 
-def rewrite(question, spans, terms):
-    """Step 3: every located mention becomes the standardised name of the
-    identifier now in its slot; whatever angle brackets remain go."""
-    for slot, (a, b) in sorted(spans.items(), key=lambda kv: kv[1][0], reverse=True):
-        question = question[:a] + standard_name(terms[slot]) + question[b:]
-    return question.replace("<", "").replace(">", "")
+def rewrite(question, span, new_subject):
+    """Step 3: the subject's mention becomes the new entity's name; whatever
+    angle brackets remain (the unchanged predicate and object mentions) go."""
+    a, b = span
+    return (question[:a] + entity_name(new_subject) + question[b:]).replace("<", "").replace(">", "")
 
 
 def main():
@@ -144,18 +117,15 @@ def main():
     print(f"step 1: {len(one_hop)} single-triple samples -> {ONE_HOP_FILE.name}")
 
     # ---- step 2 ----
-    # replacement pools: every entity and predicate anywhere in the test data
-    entities, predicates = set(), set()
+    # replacement pool: every entity anywhere in the test data
+    entities = set()
     for sample in test_data:
         for s, p, o in (m.groups() for m in ANY_TRIPLE.finditer(sample["sparql_query"])):
-            if p != RDF_TYPE:
-                predicates.add(p)
             entities.update(t for t in (s, o) if is_entity(t))
-    entities, predicates = sorted(entities), sorted(predicates)
+    entities = sorted(entities)
 
     tbox = json.loads(TBOX_RULES.read_text(encoding="utf-8"))
     DOMAIN = tbox["effective_property_domain_map"]
-    RANGE = tbox["effective_property_range_map"]
     SUBCLASSES = tbox["class_subsumptions"]
     ancestors = {}
     for parent, descendants in SUBCLASSES.items():
@@ -177,8 +147,8 @@ def main():
             e, t = f"<{b['e']['value']}>", f"<{b['t']['value']}>"
             if e in types and t in classes and t not in types[e]:
                 types[e].append(t)
-    print(f"step 2: pools of {len(entities)} entities ({sum(not t for t in types.values())} "
-          f"untyped) and {len(predicates)} predicates")
+    print(f"step 2: pool of {len(entities)} entities "
+          f"({sum(not t for t in types.values())} untyped)")
 
     def domain_covered(pred, subject):
         domains = [c for c in DOMAIN[pred] if c != OWL_THING]
@@ -187,39 +157,14 @@ def main():
         return all(any(d == t or d in ancestors.get(t, ()) for t in types[subject])
                    for d in domains)
 
-    def range_admits(pred, obj):
-        wanted = [c for c in RANGE[pred] if c != OWL_THING]
-        if not wanted or not is_entity(obj):
-            return True
-        allowed = set(wanted).union(*(SUBCLASSES.get(c, []) for c in wanted))
-        return any(t in allowed for t in types[obj])
-
-    def explicit(classes):
-        return any(c != OWL_THING for c in classes)
-
-    def admissible(old, new, slot):
-        """The T-box test for replacing old[slot]: a new subject must fall in the
-        predicate's explicit domain, a new object in its explicit range. A new
-        predicate must keep the old one's explicit domain or explicit range (or
-        both), must still admit whatever entities the triple holds, and must
-        read differently in the question. Where the subject is the answer
-        variable it must keep the domain too: those questions name the answer's
-        class ("What is the <software> whose <developer> is ..."), and a new
-        domain would leave that word describing the wrong thing."""
+    def admissible(old, new):
+        """The T-box test for a new subject: it must differ from the old subject
+        and from the object, and it must fall in the predicate's explicit domain
+        -- one naming a class other than owl:Thing."""
         s, p, o = new
-        if new[slot] == old[slot] or s == o:
-            return False
-        if slot == 0:
-            return explicit(DOMAIN[p]) and domain_covered(p, s)
-        if slot == 2:
-            return explicit(RANGE[p]) and range_admits(p, o)
-        q = old[1]
-        if s.startswith("?") and set(DOMAIN[p]) != set(DOMAIN[q]):
-            return False
-        keeps = (explicit(DOMAIN[p]) and set(DOMAIN[p]) == set(DOMAIN[q])
-                 or explicit(RANGE[p]) and set(RANGE[p]) == set(RANGE[q]))
-        return (keeps and domain_covered(p, s) and range_admits(p, o)
-                and predicate_name(p) != predicate_name(q))
+        return (s != old[0] and s != o
+                and any(c != OWL_THING for c in DOMAIN[p])
+                and domain_covered(p, s))
 
     def has_triples(s, p, o):
         """Whether the store answers the triple. Asked under both namespace
@@ -232,42 +177,34 @@ def main():
     rng = random.Random(SEED)
     # triples already made: two samples can share a predicate and object, and
     # must not then both become the same counterfactual
-    counterfactuals, made, replaced, failed = [], set(), Counter(), []
+    counterfactuals, made, failed = [], set(), []
     for sample in one_hop:
         if len(counterfactuals) == COUNTERFACTUALS_WANTED:
             break
         query, question = sample["sparql_query"], sample["intermediary_question"]
         match = ONE_TRIPLE_QUERY.match(query)
-        old = list(match.groups())
-        spans = locate(question, old)
-        slots = [slot for slot in sorted(spans) if slot in SWAP_SLOTS]
-        rng.shuffle(slots)
+        old = match.groups()
+        span = locate_subject(question, old[0])
+        if span is None:  # the subject's mention was not found -- nothing to rewrite
+            failed.append(sample["_id"])
+            continue
         found = None
-        for slot in slots:
-            pool = predicates if slot == 1 else entities
-            for term in rng.sample(pool, len(pool)):
-                new = old.copy()
-                new[slot] = term
-                if (admissible(old, new, slot) and tuple(new) not in made
-                        and not has_triples(*new)):
-                    found = slot, new
-                    break
-            if found:
+        for term in rng.sample(entities, len(entities)):
+            new = (term,) + old[1:]
+            if admissible(old, new) and new not in made and not has_triples(*new):
+                found = new
                 break
         if not found:
             failed.append(sample["_id"])
             continue
-        slot, new = found
-        made.add(tuple(new))
-        a, b = match.span(slot + 1)
+        made.add(found)
+        a, b = match.span(1)  # group 1 is the subject
         # ---- step 3 ----
         counterfactuals.append({
-            "question": rewrite(question, spans, new),
-            "sparql_query": query[:a] + new[slot] + query[b:],
+            "question": rewrite(question, span, found[0]),
+            "sparql_query": query[:a] + found[0] + query[b:],
         })
-        replaced[SLOT_NAMES[slot]] += 1
-    print(f"        replaced: {dict(replaced)}; {len(failed)} samples had no admissible "
-          f"empty replacement")
+    print(f"        {len(failed)} samples had no admissible empty replacement")
     if len(counterfactuals) < COUNTERFACTUALS_WANTED:
         print(f"        only {len(counterfactuals)} of {COUNTERFACTUALS_WANTED} wanted -- "
               f"the single-triple samples ran out")
