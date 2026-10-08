@@ -23,7 +23,7 @@ Step 2  write those samples whole, in test-file order and with LC-QuAD's
 Step 1 needs the local Fuseki endpoint running (the Fuseki cell of
 evaluations and results/dbpedia_endpoint_local.ipynb).
 
-    python counterfactuals/build_unanswerable_questions.py
+    python unanswerable_questions/build_unanswerable_questions.py
 """
 import json
 import re

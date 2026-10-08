@@ -13,7 +13,7 @@ Step 3  rewrite the subject's mention in the sample's intermediary_question
         with the name of the entity now in its place; the predicate and object
         mentions keep the question's own wording, with the angle brackets
         dropped.
-Step 4  write the {question, sparql_query} pairs to "counterfactual 1 hops.json".
+Step 4  write the {question, sparql_query} pairs to "unanswerable 1 hops.json".
 
 T-box semantics are the decoder's, as dbpedia_endpoint_local.ipynb mirrors them:
 a subject satisfies a domain when one of its types IS that class or a subclass of
@@ -25,7 +25,7 @@ nothing) would admit any term at all.
 Step 2 needs the local Fuseki endpoint running (the Fuseki cell of
 evaluations and results/dbpedia_endpoint_local.ipynb).
 
-    python counterfactuals/build_counterfactuals.py
+    python unanswerable_questions/build_unanswerables.py
 """
 import json
 import random
@@ -39,7 +39,7 @@ PROJECT = HERE.parent
 TEST_DATA = PROJECT / "lcquad_data" / "test-data.json"
 TBOX_RULES = PROJECT / "tbox_reasoner" / "tbox_rules.json"
 ONE_HOP_FILE = HERE / "lcquad 1 hop.json"
-COUNTERFACTUAL_FILE = HERE / "counterfactual 1 hops.json"
+COUNTERFACTUAL_FILE = HERE / "unanswerable 1 hops.json"
 ENDPOINT = "http://localhost:3030/dbpedia/sparql"
 COUNTERFACTUALS_WANTED = 100
 SEED = 0
