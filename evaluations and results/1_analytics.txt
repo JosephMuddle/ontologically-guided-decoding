@@ -1,5 +1,5 @@
 LC-QuAD v1.0 test -- execution evaluation
-endpoint: local Jena Fuseki, DBpedia 2016-04 core (en)  2026-09-16 20:56
+endpoint: local Jena Fuseki, DBpedia 2016-04 core (en)  2026-09-23 13:39
 beam width: 1
 
 questions: 1000  (select: 794, count: 123, ask: 83)
@@ -13,7 +13,7 @@ rungs evaluated: positive, negative, both, no_boosts, grammar_only, unconstraine
 
 POSITIVE GUIDANCE (grammar + tries + domain/range coverage boosts):
   execution failures: 0
-  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.437
+  QALD macro F1 (QALD-9) over all 1000 questions (ASK/COUNT scored 0/1): 0.437
 
   exact answer match: 410/1000 (41.0%)
     select 322/794 (40.6%)
@@ -24,12 +24,12 @@ POSITIVE GUIDANCE (grammar + tries + domain/range coverage boosts):
     count  33/123 (26.8%)
     ask    26/83 (31.3%)
   SELECT answer sets (n=794), macro-averaged over questions:
-    precision 0.952  recall 0.445  F1 0.440
+    precision 0.445  recall 0.440  F1 0.440
     both empty (produced & gold): 14
 
 NEGATIVE GUIDANCE (grammar + tries + class-disjointness penalties):
   execution failures: 0
-  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.435
+  QALD macro F1 (QALD-9) over all 1000 questions (ASK/COUNT scored 0/1): 0.435
 
   exact answer match: 409/1000 (40.9%)
     select 321/794 (40.4%)
@@ -40,12 +40,12 @@ NEGATIVE GUIDANCE (grammar + tries + class-disjointness penalties):
     count  33/123 (26.8%)
     ask    26/83 (31.3%)
   SELECT answer sets (n=794), macro-averaged over questions:
-    precision 0.953  recall 0.443  F1 0.437
+    precision 0.442  recall 0.438  F1 0.437
     both empty (produced & gold): 14
 
 BOTH (grammar + tries + coverage boosts and disjointness penalties):
   execution failures: 0
-  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.437
+  QALD macro F1 (QALD-9) over all 1000 questions (ASK/COUNT scored 0/1): 0.437
 
   exact answer match: 410/1000 (41.0%)
     select 322/794 (40.6%)
@@ -56,12 +56,12 @@ BOTH (grammar + tries + coverage boosts and disjointness penalties):
     count  33/123 (26.8%)
     ask    26/83 (31.3%)
   SELECT answer sets (n=794), macro-averaged over questions:
-    precision 0.952  recall 0.445  F1 0.440
+    precision 0.445  recall 0.440  F1 0.440
     both empty (produced & gold): 14
 
 NO BOOSTS (grammar + tries, no domain/range guidance):
   execution failures: 0
-  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.435
+  QALD macro F1 (QALD-9) over all 1000 questions (ASK/COUNT scored 0/1): 0.435
 
   exact answer match: 409/1000 (40.9%)
     select 321/794 (40.4%)
@@ -72,12 +72,12 @@ NO BOOSTS (grammar + tries, no domain/range guidance):
     count  33/123 (26.8%)
     ask    26/83 (31.3%)
   SELECT answer sets (n=794), macro-averaged over questions:
-    precision 0.954  recall 0.443  F1 0.437
+    precision 0.442  recall 0.438  F1 0.437
     both empty (produced & gold): 14
 
 GRAMMAR ONLY (query structure alone, free-form IRIs):
   execution failures: 0
-  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.411
+  QALD macro F1 (QALD-9) over all 1000 questions (ASK/COUNT scored 0/1): 0.411
 
   exact answer match: 384/1000 (38.4%)
     select 297/794 (37.4%)
@@ -88,12 +88,12 @@ GRAMMAR ONLY (query structure alone, free-form IRIs):
     count  34/123 (27.6%)
     ask    26/83 (31.3%)
   SELECT answer sets (n=794), macro-averaged over questions:
-    precision 0.962  recall 0.415  F1 0.409
+    precision 0.414  recall 0.410  F1 0.409
     both empty (produced & gold): 14
 
 UNCONSTRAINED (raw fine-tuned model, no constraints):
   execution failures: 2
-  QALD macro F1 over all 1000 questions (ASK/COUNT scored 0/1): 0.411
+  QALD macro F1 (QALD-9) over all 1000 questions (ASK/COUNT scored 0/1): 0.411
 
   exact answer match: 384/1000 (38.4%)
     select 297/794 (37.4%)
@@ -104,7 +104,7 @@ UNCONSTRAINED (raw fine-tuned model, no constraints):
     count  34/123 (27.6%)
     ask    26/83 (31.3%)
   SELECT answer sets (n=794), macro-averaged over questions:
-    precision 0.962  recall 0.415  F1 0.409
+    precision 0.414  recall 0.410  F1 0.409
     both empty (produced & gold): 14
 
 SUMMARY (QALD macro F1 | exact answer | exact query):
@@ -114,6 +114,55 @@ SUMMARY (QALD macro F1 | exact answer | exact query):
   no_boosts       0.435  |    409/1000 (40.9%)  |    257/1000 (25.7%)
   grammar_only    0.411  |    384/1000 (38.4%)  |    247/1000 (24.7%)
   unconstrained   0.411  |    384/1000 (38.4%)  |    247/1000 (24.7%)
+
+T-box guidance on questions where the ontology has something to say
+
+Subset defined by the GOLD predicates; a predicate counts as informative when
+its effective domain or range names at least one class other than owl:Thing.
+rdf:type tails are excluded -- they carry no domain or range of their own.
+Namespace-neutral match uses the same conservative twin rule as the block
+above (only local names whitelisted in both namespaces are collapsed).
+
+The bottom subset is the control: the T-box cannot help there, so a boost
+delta of the same size on both is evidence that vacuity is not the binding
+constraint. Note the subset is defined by gold predicates while the model may
+emit others -- a proxy, not a controlled experiment.
+
+every gold predicate informative: n=342 (34.2% of 1000)
+  rung                exact query   modulo namespace     exact answer
+  positive            105 (30.7%)        147 (43.0%)      154 (45.0%)
+  negative            106 (31.0%)        146 (42.7%)      153 (44.7%)
+  both                105 (30.7%)        147 (43.0%)      154 (45.0%)
+  no_boosts           106 (31.0%)        146 (42.7%)      153 (44.7%)
+  grammar_only         99 (28.9%)        141 (41.2%)      141 (41.2%)
+  unconstrained        99 (28.9%)        141 (41.2%)      141 (41.2%)
+  T-box guidance (positive - no_boosts): exact -1, modulo-namespace +1, answer +1
+  T-box guidance (negative - no_boosts): exact +0, modulo-namespace +0, answer +0
+  T-box guidance (both - no_boosts): exact -1, modulo-namespace +1, answer +1
+
+at least one informative: n=599 (59.9% of 1000)
+  rung                exact query   modulo namespace     exact answer
+  positive            147 (24.5%)        217 (36.2%)      246 (41.1%)
+  negative            148 (24.7%)        216 (36.1%)      245 (40.9%)
+  both                147 (24.5%)        217 (36.2%)      246 (41.1%)
+  no_boosts           148 (24.7%)        215 (35.9%)      245 (40.9%)
+  grammar_only        142 (23.7%)        208 (34.7%)      226 (37.7%)
+  unconstrained       142 (23.7%)        208 (34.7%)      226 (37.7%)
+  T-box guidance (positive - no_boosts): exact -1, modulo-namespace +2, answer +1
+  T-box guidance (negative - no_boosts): exact +0, modulo-namespace +1, answer +0
+  T-box guidance (both - no_boosts): exact -1, modulo-namespace +2, answer +1
+
+none informative (control): n=401 (40.1% of 1000)
+  rung                exact query   modulo namespace     exact answer
+  positive            109 (27.2%)        147 (36.7%)      164 (40.9%)
+  negative            109 (27.2%)        148 (36.9%)      164 (40.9%)
+  both                109 (27.2%)        147 (36.7%)      164 (40.9%)
+  no_boosts           109 (27.2%)        149 (37.2%)      164 (40.9%)
+  grammar_only        105 (26.2%)        143 (35.7%)      158 (39.4%)
+  unconstrained       105 (26.2%)        143 (35.7%)      158 (39.4%)
+  T-box guidance (positive - no_boosts): exact +0, modulo-namespace -2, answer +0
+  T-box guidance (negative - no_boosts): exact +0, modulo-namespace -1, answer +0
+  T-box guidance (both - no_boosts): exact +0, modulo-namespace -2, answer +0
 
 Ontological compatibility of the gold query
 
@@ -140,7 +189,7 @@ GOLD ONTOLOGICALLY COMPATIBLE: n=885 (88.5% of 1000)
 
 POSITIVE GUIDANCE (grammar + tries + domain/range coverage boosts):
   execution failures: 0
-  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.448
+  QALD macro F1 (QALD-9) over all 885 questions (ASK/COUNT scored 0/1): 0.448
 
   exact answer match: 372/885 (42.0%)
     select 290/703 (41.3%)
@@ -151,12 +200,12 @@ POSITIVE GUIDANCE (grammar + tries + domain/range coverage boosts):
     count  32/111 (28.8%)
     ask    23/71 (32.4%)
   SELECT answer sets (n=703), macro-averaged over questions:
-    precision 0.953  recall 0.453  F1 0.447
+    precision 0.452  recall 0.449  F1 0.447
     both empty (produced & gold): 12
 
 NEGATIVE GUIDANCE (grammar + tries + class-disjointness penalties):
   execution failures: 0
-  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.446
+  QALD macro F1 (QALD-9) over all 885 questions (ASK/COUNT scored 0/1): 0.446
 
   exact answer match: 371/885 (41.9%)
     select 289/703 (41.1%)
@@ -167,12 +216,12 @@ NEGATIVE GUIDANCE (grammar + tries + class-disjointness penalties):
     count  32/111 (28.8%)
     ask    23/71 (32.4%)
   SELECT answer sets (n=703), macro-averaged over questions:
-    precision 0.953  recall 0.450  F1 0.445
+    precision 0.450  recall 0.446  F1 0.445
     both empty (produced & gold): 12
 
 BOTH (grammar + tries + coverage boosts and disjointness penalties):
   execution failures: 0
-  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.448
+  QALD macro F1 (QALD-9) over all 885 questions (ASK/COUNT scored 0/1): 0.448
 
   exact answer match: 372/885 (42.0%)
     select 290/703 (41.3%)
@@ -183,12 +232,12 @@ BOTH (grammar + tries + coverage boosts and disjointness penalties):
     count  32/111 (28.8%)
     ask    23/71 (32.4%)
   SELECT answer sets (n=703), macro-averaged over questions:
-    precision 0.953  recall 0.453  F1 0.447
+    precision 0.452  recall 0.449  F1 0.447
     both empty (produced & gold): 12
 
 NO BOOSTS (grammar + tries, no domain/range guidance):
   execution failures: 0
-  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.446
+  QALD macro F1 (QALD-9) over all 885 questions (ASK/COUNT scored 0/1): 0.446
 
   exact answer match: 371/885 (41.9%)
     select 289/703 (41.1%)
@@ -199,12 +248,12 @@ NO BOOSTS (grammar + tries, no domain/range guidance):
     count  32/111 (28.8%)
     ask    23/71 (32.4%)
   SELECT answer sets (n=703), macro-averaged over questions:
-    precision 0.955  recall 0.450  F1 0.445
+    precision 0.450  recall 0.446  F1 0.445
     both empty (produced & gold): 12
 
 GRAMMAR ONLY (query structure alone, free-form IRIs):
   execution failures: 0
-  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.418
+  QALD macro F1 (QALD-9) over all 885 questions (ASK/COUNT scored 0/1): 0.418
 
   exact answer match: 346/885 (39.1%)
     select 265/703 (37.7%)
@@ -215,12 +264,12 @@ GRAMMAR ONLY (query structure alone, free-form IRIs):
     count  32/111 (28.8%)
     ask    24/71 (33.8%)
   SELECT answer sets (n=703), macro-averaged over questions:
-    precision 0.964  recall 0.416  F1 0.411
+    precision 0.415  recall 0.412  F1 0.411
     both empty (produced & gold): 12
 
 UNCONSTRAINED (raw fine-tuned model, no constraints):
   execution failures: 1
-  QALD macro F1 over all 885 questions (ASK/COUNT scored 0/1): 0.418
+  QALD macro F1 (QALD-9) over all 885 questions (ASK/COUNT scored 0/1): 0.418
 
   exact answer match: 346/885 (39.1%)
     select 265/703 (37.7%)
@@ -231,7 +280,7 @@ UNCONSTRAINED (raw fine-tuned model, no constraints):
     count  32/111 (28.8%)
     ask    24/71 (33.8%)
   SELECT answer sets (n=703), macro-averaged over questions:
-    precision 0.964  recall 0.416  F1 0.411
+    precision 0.415  recall 0.412  F1 0.411
     both empty (produced & gold): 12
 
 SUMMARY on this subset (QALD macro F1 | exact answer | exact query):
@@ -252,7 +301,7 @@ GOLD ONTOLOGICALLY INCOMPATIBLE: n=115 (11.5% of 1000)
 
 POSITIVE GUIDANCE (grammar + tries + domain/range coverage boosts):
   execution failures: 0
-  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.352
+  QALD macro F1 (QALD-9) over all 115 questions (ASK/COUNT scored 0/1): 0.352
 
   exact answer match: 38/115 (33.0%)
     select 32/91 (35.2%)
@@ -263,12 +312,12 @@ POSITIVE GUIDANCE (grammar + tries + domain/range coverage boosts):
     count  1/12 (8.3%)
     ask    3/12 (25.0%)
   SELECT answer sets (n=91), macro-averaged over questions:
-    precision 0.945  recall 0.387  F1 0.379
+    precision 0.385  recall 0.376  F1 0.379
     both empty (produced & gold): 2
 
 NEGATIVE GUIDANCE (grammar + tries + class-disjointness penalties):
   execution failures: 0
-  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.352
+  QALD macro F1 (QALD-9) over all 115 questions (ASK/COUNT scored 0/1): 0.352
 
   exact answer match: 38/115 (33.0%)
     select 32/91 (35.2%)
@@ -279,12 +328,12 @@ NEGATIVE GUIDANCE (grammar + tries + class-disjointness penalties):
     count  1/12 (8.3%)
     ask    3/12 (25.0%)
   SELECT answer sets (n=91), macro-averaged over questions:
-    precision 0.945  recall 0.387  F1 0.379
+    precision 0.385  recall 0.376  F1 0.379
     both empty (produced & gold): 2
 
 BOTH (grammar + tries + coverage boosts and disjointness penalties):
   execution failures: 0
-  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.352
+  QALD macro F1 (QALD-9) over all 115 questions (ASK/COUNT scored 0/1): 0.352
 
   exact answer match: 38/115 (33.0%)
     select 32/91 (35.2%)
@@ -295,12 +344,12 @@ BOTH (grammar + tries + coverage boosts and disjointness penalties):
     count  1/12 (8.3%)
     ask    3/12 (25.0%)
   SELECT answer sets (n=91), macro-averaged over questions:
-    precision 0.945  recall 0.387  F1 0.379
+    precision 0.385  recall 0.376  F1 0.379
     both empty (produced & gold): 2
 
 NO BOOSTS (grammar + tries, no domain/range guidance):
   execution failures: 0
-  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.352
+  QALD macro F1 (QALD-9) over all 115 questions (ASK/COUNT scored 0/1): 0.352
 
   exact answer match: 38/115 (33.0%)
     select 32/91 (35.2%)
@@ -311,12 +360,12 @@ NO BOOSTS (grammar + tries, no domain/range guidance):
     count  1/12 (8.3%)
     ask    3/12 (25.0%)
   SELECT answer sets (n=91), macro-averaged over questions:
-    precision 0.945  recall 0.387  F1 0.379
+    precision 0.385  recall 0.376  F1 0.379
     both empty (produced & gold): 2
 
 GRAMMAR ONLY (query structure alone, free-form IRIs):
   execution failures: 0
-  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.363
+  QALD macro F1 (QALD-9) over all 115 questions (ASK/COUNT scored 0/1): 0.363
 
   exact answer match: 38/115 (33.0%)
     select 32/91 (35.2%)
@@ -327,12 +376,12 @@ GRAMMAR ONLY (query structure alone, free-form IRIs):
     count  2/12 (16.7%)
     ask    2/12 (16.7%)
   SELECT answer sets (n=91), macro-averaged over questions:
-    precision 0.946  recall 0.407  F1 0.393
+    precision 0.408  recall 0.396  F1 0.393
     both empty (produced & gold): 2
 
 UNCONSTRAINED (raw fine-tuned model, no constraints):
   execution failures: 1
-  QALD macro F1 over all 115 questions (ASK/COUNT scored 0/1): 0.363
+  QALD macro F1 (QALD-9) over all 115 questions (ASK/COUNT scored 0/1): 0.363
 
   exact answer match: 38/115 (33.0%)
     select 32/91 (35.2%)
@@ -343,7 +392,7 @@ UNCONSTRAINED (raw fine-tuned model, no constraints):
     count  2/12 (16.7%)
     ask    2/12 (16.7%)
   SELECT answer sets (n=91), macro-averaged over questions:
-    precision 0.946  recall 0.407  F1 0.393
+    precision 0.408  recall 0.396  F1 0.393
     both empty (produced & gold): 2
 
 SUMMARY on this subset (QALD macro F1 | exact answer | exact query):

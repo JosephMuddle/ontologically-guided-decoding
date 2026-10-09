@@ -3,9 +3,6 @@
 All URIs are written as bracketed IRIs (``<http://...>``), matching the SPARQL
 surface form used downstream.
 
-Every property-related calculation is restricted to the LC-QuAD predicate
-whitelist (``lcquad_data/predicates.txt``); class calculations (subsumption,
-disjointness, equivalence) are unrestricted.
 
 Effective property domains/ranges accumulate conjunctively over the whole
 ``rdfs:subPropertyOf`` ancestry (ancestors are walked even if not whitelisted);
