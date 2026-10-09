@@ -1,88 +1,24 @@
 """
 Type-constrained generation.
 
-Step 1: load the merged Qwen2.5-Coder-1.5B checkpoint produced by the
-fine-tuning notebook. Qwen is a decoder-only causal language model, so the
-question prompt and generated SPARQL share one token sequence.
+Step 1: load the merged Qwen2.5-Coder-1.5B checkpoint
 
-Step 2: the xgrammar grammars that define legal SPARQL structure -- the five
-beginning templates, and the relation grammar (the predicate whitelist with
-the type-triple tail folded in, since a type tail always follows an entity
-slot). Each is compiled against the BART tokenizer so it can later produce
-next-token masks.
+Step 2: the xgrammar grammars that define legal SPARQL structure
 
-Step 3: masked generation, phase 1 -- the beginning template. The decoder
-decodes greedily, but before choosing each token it asks the grammar matcher
-for the bitmask of legal next tokens and applies it to the logits, so the
-produced head is always one of the five templates. The finished head is kept
-in query_so_far, which later phases (triples, type tail) keep appending to.
+Step 3: masked generation, the beginning template.
 
-Step 4: the state tracker, state = {"idx", "prev"} in the decoder's scope, as
-in parse_query. The end of the beginning decides the first triple slot: a
-trailing variable (?uri/?x) means the subject is done, so idx = 1 (relation
-next) and prev = that variable; a trailing '<' (the ent templates) means
-idx = 0 (entity next), prev = None, and the '<' is stripped from
-query_so_far (it is re-added together with the entity itself).
+Step 4: the state tracker, state = {"idx", "prev"} as in parse_query. The end
+of the beginning picks the first triple slot: trailing variable (?uri/?x) ->
+idx = 1 (relation next), prev = that variable; trailing '<' (ent templates)
+-> idx = 0 (entity next), prev = None, and the '<' is stripped from
+query_so_far (re-added together with the entity itself).
 
-Step 5: phase 2, the triples loop -- so far only the entity slot (idx 0, the
-subject right after an ent beginning). Decoding is guided by the merged
-all-entities trie: at the start of a triple no relation has been chosen yet,
-so any entity in the KB is legal. This is parse_query's trie_match inverted:
-instead of checking a given token against the trie, the logits are masked to
-the current trie node's children and the model picks. A terminal node also
-offers the glued ' <' that opens the coming relation slot -- that is how the
-model says "the entity ends here". Spellings are not committed slot by slot:
-the whole query is beam-searched (whole_query_beam, width BEAM_WIDTH), so an
-entity chosen here can still lose to an alternative once the rest of the
-triple has been scored.
+Step 5: phase 2, the triples loop
 
-Step 6: the relation slot (idx 1). The hard mask is always the whole
-relation grammar, so every whitelisted relation stays legal and the type
-tail can close the query early. When the subject is an entity rather than a
-variable (prev an IRI), the matcher is primed with the glued ' <' the
-entity slot ended on, and soft ontological guidance is layered on top: the
-subject's classes are found by walking every class trie over the entity's
-tokens, relations whose effective domains those classes cover form a small
-encouragement trie, and tokens continuing one of them are boosted when the
-beam picks which continuations to expand. The score is settled once, at the
-end of the slot: a relation that turns out not to be one of them costs
-RELATION_BOOST, however many tokens it spanned.
-
-Step 7: the object slot (idx 2) and triple chaining. The object is any
-entity or variable from the merged trie; entities inside the relation's
-effective range are encouraged via OBJECT_BOOST, again settled once at the
-end of the slot. A range says which entity an object may be, not whether it
-is an entity at all, so the boost stays out of the slot's first token -- the
-one that picks '<' or '?' -- and a variable object is neither encouraged nor
-charged. Renormalisation is why that has to be explicit: boosting only the
-'<' branch there does not leave '?' neutral, it prices it out of reach by the
-whole of OBJECT_BOOST. The class tries are partitioned by most-specific
-direct type (extract_entities.py assigns only the direct type to
-class_entities.json), so a superclass trie does NOT contain its subclasses:
-the range boost walks the range class's trie and every subclass trie in
-parallel. The slot ends with the model
-choosing ' .' (chain another triple, back to idx 0) or ' }' (close the
-query).
-
-Guidance rungs. Steps 6 and 7 describe generate_positive(), which steers
-towards what the T-box licenses and charges whatever falls outside it.
-generate_negative() reads disjoint_class_map instead and acts only on evidence
-of incompatibility: a relation is steered against when a class in its effective
-domain is disjoint with the subject's types, an object when its class is
-disjoint with the relation's effective range, and only those are charged. An
-untyped subject, a domain the types merely fail to cover, or an owl:Thing
-declaration therefore costs nothing -- the cases the positive rung counts
-against gold on about one LC-QuAD question in nine. The penalty lands on
-deciding tokens only: a token is penalised when every completion running through
-it is disjoint and none is not, so the shared namespace, and any prefix still
-common to a compatible choice, is left alone. Variables sit in every class trie,
-so a variable object is never on the disjoint side and needs no exemption here.
-generate_both() applies the two at once: compatible continuations are boosted,
-clashing ones suppressed, and the charges add, so a relation or object the types
-merely fail to cover pays once and a provably disjoint one pays twice. The two
-can only meet on a class the T-box makes unsatisfiable -- in DBpedia 2016-04 that
-is Library alone, filed under both Building and Organisation, branches declared
-disjoint -- and there the boost and the penalty simply offset.
+Steps 6/7: generate_positive() -- boosts what the T-box licenses, charges what
+falls outside. Untyped subject, uncovered domain or owl:Thing declaration
+costs nothing. Penalties land on deciding tokens only: a token is penalised
+when every completion through it is disjoint.
 """
 import functools
 import json
@@ -117,7 +53,6 @@ MODEL_WEIGHTS = Path(os.environ.get("MODEL_WEIGHTS", "model/qwen_lcquad.safetens
 if not MODEL_WEIGHTS.is_absolute():
     MODEL_WEIGHTS = Path(__file__).parent / MODEL_WEIGHTS
 
-# GPU when one is available (e.g. Colab), CPU otherwise
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 if not MODEL_WEIGHTS.exists():
@@ -126,17 +61,10 @@ if not MODEL_WEIGHTS.exists():
         "the .safetensors file saved by fine_tune_qwen.ipynb."
     )
 
-# The notebook fine-tunes every weight of MODEL_ID without touching the
-# architecture or the vocabulary, so config and tokenizer still come from the
-# base model and only the weights are local. Building from the config means no
-# base weights are fetched -- they would all be overwritten anyway.
+
 config = AutoConfig.from_pretrained(MODEL_ID)
 model = AutoModelForCausalLM.from_config(config)
 
-# Qwen2.5 ties lm_head to the input embedding, and save_pretrained drops the
-# duplicate, so lm_head.weight is absent from the file: load non-strictly and
-# re-tie. Any OTHER missing or unexpected key means these weights do not belong
-# to this architecture, which would otherwise leave a silently random model
 missing, unexpected = model.load_state_dict(load_file(MODEL_WEIGHTS), strict=False)
 missing = [k for k in missing if k != "lm_head.weight"]
 if missing or unexpected:
@@ -154,15 +82,11 @@ print(f"loaded {MODEL_WEIGHTS.name} into {MODEL_ID} on {DEVICE}")
 
 
 def decoder_step(input_ids, cache, attention_mask):
-    """One decoding step for the whole beam at once: next-token logits for every
-    row, and the KV cache grown by the tokens just fed in.
+    """One decoding step for the whole beam: next-token logits per row, cache
+    grown by the tokens just fed in.
 
-    Row i of every argument and of the result belongs to live hypothesis i. On a
-    query's first step `cache` is None and `input_ids` is the whole prompt; from
-    then on the cache already holds every token but the newest, so exactly one
-    token per row goes through the model. Without this the beam re-read its
-    entire prefix at every token of every hypothesis, which is quadratic in the
-    query length and linear in the beam width on top."""
+    Row i of every argument and the result is live hypothesis i. First step:
+    cache None, input_ids the whole prompt; after that, one token per row."""
     with torch.no_grad():
         out = model(input_ids=input_ids, attention_mask=attention_mask,
                     past_key_values=cache, use_cache=True)
@@ -170,20 +94,16 @@ def decoder_step(input_ids, cache, attention_mask):
 
 
 def reparent_cache(cache, rows):
-    """Re-order the cache so that row i holds the keys and values of old row
-    rows[i]. Repeats are allowed -- that is how the single prompt row fans out
-    into a full beam on the first step -- and omissions are how a hypothesis that
-    died or finished releases its row."""
+    """Re-order the cache so row i holds the keys and values of old row rows[i]."""
     idx = torch.tensor(rows, dtype=torch.long, device=DEVICE)
     if hasattr(cache, "reorder_cache"):
         cache.reorder_cache(idx)  # transformers Cache objects reorder in place
         return cache
-    # legacy format: one (key, value) pair of [batch, heads, seq, dim] per layer
     return tuple(tuple(t.index_select(0, idx) for t in layer) for layer in cache)
 
 
-# compiled against the tokenizer, so each grammar can later produce a
-# next-token mask, not just accept/reject a finished string
+# compiled against the tokenizer, so grammars can produce next-token masks,
+# not just accept/reject a finished string
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 if tokenizer.pad_token is None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -209,12 +129,11 @@ def escape(s):
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
-# relation slot: exactly one whitelisted predicate, or the type tail
-# ' <rdf:type> <class> }' -- a type tail always follows an entity slot, so it
-# lives in the relation grammar; it is the only place a class may appear, and
-# it closes the query early. Literals carry a leading and trailing space: the
-# leading space glues onto the ' <' token that separates slots in real
-# queries, the trailing space separates from the next slot
+# relation slot: one whitelisted predicate, or the type tail
+# ' <rdf:type> <class> }' -- the only place a class may appear, and it closes
+# the query early. Literals carry leading/trailing spaces: the leading space
+# glues onto the ' <' token between slots, the trailing space separates from
+# the next slot
 TBOX_RULES = json.loads(
     (Path(__file__).parent / "tbox_reasoner" / "tbox_rules.json").read_text(encoding="utf-8")
 )
@@ -231,19 +150,9 @@ relation_grammar = compiler.compile_grammar(RELATION_GRAMMAR)
 
 print(f"compiled grammars: 5 beginning templates, {len(RELATIONS)} relations + type tail, {len(CLASSES)} classes")
 
-# grammar-only rung, used by generate_grammar_only(): ONE grammar for the whole
-# query rather than one per slot. Every position accepts any well-formed IRI or
-# variable on shape alone -- no trie membership check and no predicate
-# whitelist, since three IRIs in a row is perfectly valid SPARQL.
-#
-# The single grammar is what makes it work. Per-slot grammars ended at a slot
-# boundary, which masked out exactly the tokens BPE actually produces there: a
-# grammar ending at ">" rejects "> " and "> <" for overrunning it, leaving only
-# the bare ">" token, which the model almost never emits in that position. It
-# then never closed the IRI and ran away, reaching for oddities like the
-# <|fim_suffix|> special token whose spelling happens to end in ">". With one
-# grammar spanning the query no boundary is forced anywhere, so the natural
-# glued tokens stay legal.
+# grammar-only rung, used by generate_grammar_only(): ONE grammar for the
+# whole query. Every position accepts any well-formed IRI or variable on
+# shape alone
 QUERY_TEMPLATE = r"""
 root    ::= head triples
 head    ::= "SELECT DISTINCT ?uri WHERE { " | "SELECT DISTINCT COUNT(?uri) WHERE { " | "ASK WHERE { "
@@ -255,10 +164,9 @@ body    ::= [^<> ]+
 query_grammar = compiler.compile_grammar(QUERY_TEMPLATE)
 
 # entity tries, precomputed by preprocessing/build_class_tries.py: one
-# dict-of-dicts token trie per class plus a merged trie over every entity in
-# the KB (variables ?uri/?x are in every trie). Generation walks these where
-# the parser walked them: a ~1.5M-literal entity alternation cannot be
-# compiled by xgrammar, but a trie is walked in O(tokens)
+# dict-of-dicts token trie per class plus a merged all-entities trie
+# (variables ?uri/?x in every trie). A ~1.5M-literal alternation cannot be
+# compiled by xgrammar; a trie is walked in O(tokens)
 TRIE_END = None  # terminal marker key inside a trie node (must match the pkl)
 LT_ID = tokenizer("<", add_special_tokens=False).input_ids[0]        # bare '<'
 GL_LT_ID = tokenizer(" <", add_special_tokens=False).input_ids[0]    # glued ' <'
@@ -277,46 +185,27 @@ print(f"loaded {len(CLASS_TRIES)} class tries in {time.time() - _start:.1f}s")
 # soft ontological guidance for the relation slot after an entity subject
 # ---------------------------------------------------------------------------
 
-# the price of ontological incompatibility, in nats of query score: charged
-# once on an incompatible relation and once on an incompatible object, where
-# the guidance rung decides what incompatible means (below). The same number biases
-# which continuations the beam expands, at every token of the slot -- but only
-# the one-off reaches the score, so the guidance is worth a fixed amount rather
-# than a multiple of it that depends on how BPE happened to split the IRI. A
-# penalty and not a credit so that a score can still only fall, which is what
-# lets whole_query_beam() retire a hypothesis for good.
-# The experimental knob of the soft-constraint variant (0 == pure hard
-# constraint)
+# the price of ontological incompatibility, in nats: charged once on an
+# incompatible relation, once on an incompatible object. The soft-constraint
+# knob (0 == pure hard constraint)
 RELATION_BOOST = 5.0
 OBJECT_BOOST = 5.0  # same idea, for range-compatible objects (idx 2)
 
-# the guidance rungs, as Hyp modes: which T-box evidence steers and prices the
-# relation and object slots. no_boosts ('tries') and grammar_only ('grammar')
-# take none of it.
-#   positive  steer TOWARDS relations whose effective domain the subject's types
-#             cover and objects inside the effective range; charge the rest
-#   negative  steer AWAY from relations whose domain is disjoint with the
-#             subject's types and objects whose class is disjoint with the range;
-#             charge only those, so missing type evidence is never held against
-#             a choice
-#   both      the two together; the charges add
+# the guidance rungs, as Hyp modes
 POSITIVE_MODES = ("positive", "both")
 NEGATIVE_MODES = ("negative", "both")
 GUIDED_MODES = ("positive", "negative", "both")
 
-# width of the whole-query beam search (whole_query_beam); 1 reproduces greedy
-# decoding exactly. SPARKLE used ~7 over the whole query, which is now the same
-# quantity this sets. Read from the environment so test.py's --beams can set it
-# without editing this file
+# whole-query beam width; 1 reproduces greedy decoding exactly
 BEAM_WIDTH = int(os.getenv("BEAM_WIDTH", "4"))
 
 EFFECTIVE_PROPERTY_DOMAIN_MAP = TBOX_RULES["effective_property_domain_map"]
 EFFECTIVE_PROPERTY_RANGE_MAP = TBOX_RULES["effective_property_range_map"]
 OWL_THING = "<http://www.w3.org/2002/07/owl#Thing>"
 
-# child class -> all its transitive ancestor classes, inverted from the
-# parent -> descendants subsumption map: an entity of class C also covers
-# every domain that is an ancestor of C
+# child class -> transitive ancestors, inverted from the parent -> descendants
+# subsumption map: an entity of class C also covers every domain that is an
+# ancestor of C
 ANCESTORS = {}
 for _parent, _descendants in TBOX_RULES["class_subsumptions"].items():
     for _child in _descendants:
@@ -324,14 +213,12 @@ for _parent, _descendants in TBOX_RULES["class_subsumptions"].items():
 
 
 def entity_types(entity_text):
-    """All classes of a bracketed entity IRI, found by walking every class
-    trie over the entity's tokens in parallel; a class matches when its trie
-    reaches a terminal node exactly at the end of the entity.
+    """All classes of a bracketed entity IRI, by walking every class trie over
+    the entity's tokens in parallel; a class matches when its trie reaches a
+    terminal node exactly at the entity's end.
 
-    This deliberately reuses the already-loaded class tries as a membership
-    index rather than building an entity -> types map: the walk is
-    ~412 classes x ~12 tokens of dict lookups (microseconds per call), while
-    an inverted map would duplicate the 283 MB class_entities.json in RAM.
+    Reuses the class tries as a membership index: ~412 classes x ~12 tokens of
+    dict lookups per call, vs duplicating the 283 MB class_entities.json in RAM.
     """
     entity_ids = tokenizer(entity_text, add_special_tokens=False).input_ids
     types = []
@@ -349,9 +236,9 @@ def entity_types(entity_text):
 
 
 def encouraged_relations(types):
-    """The whitelisted relations whose effective domains are all covered by
-    the given types: a type covers a domain class if it is that class or a
-    descendant of it, and owl:Thing domains are covered by everything."""
+    """Whitelisted relations whose effective domains the given types all
+    cover: a type covers a domain class if it is that class or a descendant of
+    it; owl:Thing domains are covered by everything."""
     encouraged = []
     for rel in RELATIONS:
         if all(
@@ -378,11 +265,11 @@ def build_boost_trie(relations):
 
 
 def range_tries(relation):
-    """The class tries an object of this relation may come from: each
-    effective range class plus all its subclasses. The class tries are
-    partitioned by most-specific direct type, so subclass entities are NOT
-    inside the superclass trie and must be unioned explicitly. owl:Thing
-    ranges are unconstrained and yield no tries (no boost)."""
+    """Class tries an object of this relation may come from: each effective
+    range class plus all its subclasses. The class tries are partitioned by
+    most-specific direct type, so subclass entities are NOT inside the
+    superclass trie and must be unioned explicitly. owl:Thing ranges are
+    unconstrained: no tries, no boost."""
     tries = []
     for cls in EFFECTIVE_PROPERTY_RANGE_MAP[relation]:
         if cls == OWL_THING:
@@ -393,12 +280,11 @@ def range_tries(relation):
     return tries
 
 
-# class -> every class disjoint with it or with one of its ancestors. Checked
-# against the other side's ancestors in clashes(), which together is conflict()
-# from disjointness_headroom.py: disjointness is inherited downwards on both
-# sides, so a class clashes with anything below a class its superclass is
-# disjoint with. (The T-box reasoner already ships disjoint_class_map closed
-# and symmetric; closing it here again keeps clashes() right if that changes.)
+# class -> every class disjoint with it or one of its ancestors. Disjointness
+# is inherited downwards on both sides, so a class clashes with anything below
+# a class its superclass is disjoint with; clashes() checks the other side's
+# ancestors. The T-box ships disjoint_class_map closed and symmetric; closing
+# again here keeps clashes() right if that changes
 CLASH_UP = {}
 for _cls in set(TBOX_RULES["classes"]) | TBOX_RULES["disjoint_class_map"].keys():
     _up = set()
@@ -415,10 +301,10 @@ def clashes(c1, c2):
 
 
 def disjoint_relations(types):
-    """The whitelisted relations a subject of these types provably cannot
-    head: some class in the relation's effective domain clashes with one of the
-    types. owl:Thing clashes with nothing, and an untyped subject makes no
-    relation disjoint -- the negative mode only ever acts on evidence."""
+    """Whitelisted relations a subject of these types provably cannot head:
+    some domain class clashes with one of the types. owl:Thing clashes with
+    nothing; an untyped subject makes nothing disjoint -- negative mode acts
+    on evidence only."""
     return [rel for rel in RELATIONS
             if any(d != OWL_THING and clashes(t, d)
                    for d in EFFECTIVE_PROPERTY_DOMAIN_MAP[rel] for t in types)]
@@ -426,13 +312,12 @@ def disjoint_relations(types):
 
 @functools.lru_cache(maxsize=None)
 def disjoint_range_split(relation):
-    """(disjoint, rest): the class tries split by whether their entities
-    clash with the relation's effective range. The tries are partitioned by
-    most-specific direct type, so an entity from a disjoint trie provably cannot
-    be in range. Both halves come back because a token is penalised only when no
-    entity from the rest runs through it. Classes without entities share one
-    variables-only trie object, so each side is deduplicated by identity. An
-    owl:Thing range, or one nothing is disjoint with, gives ((), ())."""
+    """(disjoint, rest): the class tries split by clash with the relation's
+    effective range. Tries are partitioned by most-specific direct type, so an
+    entity from a disjoint trie provably cannot be in range. Both halves come
+    back: a token is penalised only when no 'rest' entity runs through it.
+    Classes without entities share one variables-only trie object, so dedupe
+    by identity. owl:Thing or nothing-disjoint ranges give ((), ())."""
     ranges = [c for c in EFFECTIVE_PROPERTY_RANGE_MAP[relation] if c != OWL_THING]
     disjoint, rest = {}, {}
     for cls, trie in CLASS_TRIES.items():
@@ -446,12 +331,10 @@ def disjoint_range_split(relation):
 
 
 def deciding_penalties(disjoint_nodes, rest_nodes):
-    """The tokens that commit a spelling to a disjoint completion: continued
-    by some disjoint cursor and by no other. A token still shared with a
-    compatible completion -- the namespace, a common first syllable -- decides
-    nothing and is left alone, so the penalty lands where the choice is made.
-    With either side exhausted there is no choice left, and nothing comes back:
-    penalising every live continuation alike would be a no-op anyway."""
+    """Tokens that commit to a disjoint completion: continued by some disjoint
+    cursor and no other. A token still shared with a compatible completion
+    decides nothing. Either side exhausted -> no choice left, nothing back
+    (penalising all continuations alike would be a no-op anyway)."""
     if not disjoint_nodes or not rest_nodes:
         return set()
     disjoint = {t for n in disjoint_nodes for t in n if t is not None}
@@ -464,51 +347,32 @@ def deciding_penalties(disjoint_nodes, rest_nodes):
 
 @dataclass
 class Hyp:
-    """One whole-query hypothesis: the tokens chosen so far, their summed
-    log-prob, and the constraint state that decides what may legally come next.
+    """One whole-query hypothesis: tokens so far, summed log-prob, and the
+    constraint state that decides what may legally come next.
 
-    Scoring is the plain sum of log-probs RENORMALISED over the legal tokens,
-    less one ontological penalty per incompatible slot, and no length
-    normalisation. A token the constraints force therefore costs about nothing.
+    Score = log-probs renormalised over the legal tokens, less one flat
+    penalty per incompatible slot; no length normalisation, so a forced token
+    costs ~nothing.
 
-    Pricing the boosts into the score makes it a guided objective rather than a
-    plain log P(query|question): that is deliberate. Left out of the score
-    entirely, a boost could only change which candidates got expanded, and since
-    a trie node usually has fewer children than BEAM_WIDTH there was nothing to
-    expand differently -- it altered 2 outputs in 1000 and flipped no matches.
-    Soft guidance has to price the path to do anything at all.
+    Boosts only steer which continuations get expanded (legal_logits returns
+    a separate ranking tensor); the score settles once per slot in advance():
+    BOOST off a relation whose domain the subject's types don't cover, BOOST
+    off an object that ends outside the range. Charged against the
+    incompatible, a score only falls -- which is what lets the search retire a
+    hypothesis the moment it drops below a finished one. The residual length
+    coupling is explicit: more triples means more slots that can each be wrong
+    once.
 
-    But it has to price it ONCE. Added to the logits at every token of the slot,
-    as it was, a boost survived the renormalisation only at the steps where some
-    legal token was left unboosted, so what a compatible path actually collected
-    was BOOST times the number of such steps: 5 nats for a relation that parts
-    from its rivals in a single token, ten times that for a long object IRI that
-    stays inside its range trie all the way down. The strength of the knob was
-    therefore set by the tokenizer, and the longer an in-range object the more
-    it earned -- the length preference the search is otherwise careful not to
-    have. So the boosts now only steer which continuations get expanded
-    (legal_logits returns a separate tensor for that) and the score settles up
-    once per slot, in advance(): BOOST off a relation whose domain the subject's
-    types do not cover, BOOST off an object that ends outside the relation's
-    range. Charged that way round -- against the incompatible rather than for
-    the compatible -- a score still only falls, which is what lets the search
-    retire a hypothesis the moment it drops below a finished one. What is left
-    of the length coupling is small and explicit: a query with more triples has
-    more slots that can each be wrong once.
+    Don't score the unmasked distribution instead: the tighter the rung, the
+    more often the model is pushed onto tokens it rates poorly, so closing the
+    query early becomes the cheapest exit. Measured on a 50-question run: 30
+    one-triple queries against gold's 10, never more triples than gold. Scores
+    are only ever compared within one decode, never across rungs, so
+    renormalising costs nothing.
 
-    Scoring the unmasked distribution instead looks more principled and is a
-    trap: the tighter a rung constrains, the more often the model is pushed onto
-    tokens it rates poorly, so every extra token bleeds score and closing the
-    query early becomes the cheapest way to stop paying. Measured on a 50-question
-    run that produced one-triple queries 30 times against gold's 10, and never
-    once produced more triples than gold -- a one-sided error, the signature of a
-    search bias rather than a modelling one. These scores are only ever compared
-    within a single decode, never across rungs, so renormalising costs nothing.
-
-    Hypotheses are copied on every branch. Trie nodes are read-only dicts and are
-    shared; the xgrammar matchers are stateful and so are never stored -- they
-    are rebuilt from slot_ids on demand, a handful of accept_token calls against
-    the one batched model forward the whole beam shares each step.
+    Hypotheses are copied on every branch. Trie nodes are read-only shared
+    dicts; xgrammar matchers are stateful, so never stored -- rebuilt from
+    slot_ids on demand.
     """
     ids: list                 # prompt + generated tokens
     gen: list                 # generated tokens only -- the query
@@ -525,9 +389,9 @@ class Hyp:
     boost_node: dict = None   # encouraged-relation trie cursor (relation slot)
     encouraged: frozenset = frozenset()  # relations the subject's types allow
     ranged: bool = False      # the relation's range is narrower than owl:Thing
-    # negative guidance (the negative and both rungs). Cursors come in pairs, one
-    # over the disjoint completions and one over everything else, because a
-    # token is penalised only when nothing compatible runs through it
+    # negative guidance (the negative and both rungs). Cursors come in pairs --
+    # disjoint vs everything else -- because a token is penalised only when
+    # nothing compatible runs through it
     disjoint_node: dict = None    # disjoint-domain relation trie cursor (relation slot)
     rest_node: dict = None        # cursor over every other relation, and rdf:type
     disjoint_rels: frozenset = frozenset()  # relations the subject's types clash with
@@ -557,17 +421,14 @@ class Hyp:
         return None  # constrained entity slots are trie-driven, not grammar-driven
 
     def legal_logits(self, logits, bitmask):
-        """(ranking, legal): the next-token logits with everything the
-        constraints forbid set to -inf, twice -- once with the ontological
-        boosts added on top of what survives, once without.
+        """(ranking, legal): next-token logits with forbidden tokens at -inf,
+        twice -- once with the ontological boosts on top, once without.
 
-        The search expands the top of `ranking` and scores what it expanded
-        against `legal`, so a boost decides which continuations are tried
-        without also inflating the score of every token it happens to touch;
-        the flat per-slot price is charged in advance() instead. The two are
-        the same tensor wherever no boost applies. The boosts go in in place:
-        an illegal token is already -inf and -inf + boost is still -inf, so
-        nothing the constraints ruled out can come back through the boost."""
+        The search expands the top of `ranking` and scores against `legal`, so
+        boosts decide what gets tried without inflating the score of every
+        token they touch; the flat per-slot price lands in advance(). Same
+        tensor where no boost applies. Boosts go in in place: an illegal token
+        is already -inf and -inf + boost stays -inf."""
         grammar = self._grammar()
         if grammar is not None:
             legal = logits.clone()
@@ -594,10 +455,9 @@ class Hyp:
                 allowed += [GL_LT_ID] if self.slot == "subject" else [GL_DOT_ID, GL_RBRACE_ID]
         legal = torch.full_like(logits, float("-inf"))
         legal[0, allowed] = logits[0, allowed]
-        # from the object's SECOND token on: the first one chooses between an
-        # entity and a variable, which the range has no opinion about, and
-        # boosting one branch of a two-way choice is not neutrality -- it is the
-        # full boost against the other
+        # from the object's SECOND token on: the first chooses entity vs
+        # variable, which the range has no opinion about; boosting one branch
+        # of a two-way choice would be the full boost against the other
         if self.slot == "object" and self.slot_ids:
             boosted = {t for bn in self.boost_nodes for t in bn if t is not None}
             penalised = deciding_penalties(self.disjoint_nodes, self.rest_nodes)
@@ -611,16 +471,15 @@ class Hyp:
         return legal, legal
 
     def advance(self, tok, logprob):
-        """The transition: a copy of this hypothesis with tok appended and the
-        constraint state moved on. Mirrors the slot cycle of the phase-by-phase
-        decoder -- begin, then subject/relation/object until the text closes
-        the query with a brace."""
+        """The transition: copy of this hypothesis with tok appended, constraint
+        state moved on. Slot cycle: begin, then subject/relation/object until a
+        brace closes the query."""
         h = replace(self, ids=self.ids + [tok], gen=self.gen + [tok],
                     score=self.score + logprob, slot_ids=self.slot_ids + [tok])
 
         if h.slot == "query":
-            # grammar-only: one matcher spans the whole query, so there is no
-            # slot bookkeeping and nothing to transition between
+            # grammar-only: one matcher spans the whole query -- no slot
+            # bookkeeping, nothing to transition between
             h.done = h.matcher(query_grammar).is_terminated()
             return h
 
@@ -727,23 +586,19 @@ class Hyp:
 def whole_query_beam(start, max_new_tokens=160):
     """Token-synchronous beam search over whole queries.
 
-    Every live hypothesis advances exactly one token per round, so they always
-    share a length and the summed log-prob (renormalised over the legal tokens,
-    less one flat penalty per ontologically incompatible slot) ranks them fairly
-    -- there is nothing left for a length normalisation to correct. Finished
-    hypotheses are held in a separate pool and never compete with growing ones
-    directly: since log-probs are non-positive and the ontological penalties
-    only ever subtract, a live score can only fall, so once no live hypothesis
-    can still beat the best completed one the search is provably finished.
-    Together that leaves the search itself with no preference for long or short
-    queries; only the penalties, one per slot, can express one.
+    Every live hypothesis advances one token per round, so they always share a
+    length and the summed log-prob (renormalised, less per-slot penalties)
+    ranks them fairly -- nothing left for length normalisation to correct.
+    Finished hypotheses sit in a separate pool: scores only fall, so once no
+    live hypothesis can still beat the best completed one the search is
+    provably done. The search itself has no preference for long or short
+    queries; only the penalties can express one.
 
-    The beam decodes as ONE batch against ONE KV cache: every live hypothesis is
-    a row, the prompt goes through the model once per query, and every later step
-    feeds a single token per row. Branching, pruning and finishing are then just a
-    reordering of the cache's rows (reparent_cache), which is only sound because
-    the search is token-synchronous -- all live rows share a length, so nothing
-    has to be padded and one attention mask covers them all.
+    One batch, one KV cache: each live hypothesis is a row, the prompt goes
+    through the model once, later steps feed one token per row. Branching,
+    pruning and finishing are just a reordering of cache rows
+    (reparent_cache) -- sound only because the search is token-synchronous:
+    all rows share a length, no padding, one attention mask covers all.
     """
     bitmask = xgr.allocate_token_bitmask(1, config.vocab_size)
     live, completed, cache = [start], [], None
@@ -766,9 +621,8 @@ def whole_query_beam(start, max_new_tokens=160):
             ranking, legal = h.legal_logits(logits[row:row + 1], bitmask)
             # renormalised over the legal set, so a forced token costs ~0 and a
             # constrained rung is not pushed into closing early to stop paying.
-            # Expanded off `ranking`, scored off `legal`: the boosts pick what
-            # gets tried, and advance() charges their flat price once a slot
-            # comes out incompatible
+            # Expanded off `ranking`, scored off `legal`; advance() charges the
+            # flat price once a slot comes out incompatible
             logprobs = torch.log_softmax(legal, dim=-1)[0]
             top = ranking[0].topk(BEAM_WIDTH)
             for val, tok in zip(top.values.tolist(), top.indices.tolist()):
@@ -793,14 +647,12 @@ def whole_query_beam(start, max_new_tokens=160):
 
 @torch.no_grad()
 def generate_unconstrained(question, max_new_tokens=160):
-    """The same prompt decoded with no grammar, no tries and no ontological
-    boosts -- whatever the fine-tuned weights produce on their own.
+    """No grammar, no tries, no boosts -- whatever the fine-tuned weights
+    produce on their own.
 
-    This is the baseline the constrained decoder is measured against, so it
-    shares the guided rungs' prompt exactly and searches the same number of beams
-    (BEAM_WIDTH, here over the whole query rather than per slot); only the
-    constraints differ. Generation stops at EOS, which the fine-tune appends
-    to every training target."""
+    Baseline for the constrained decoder: same prompt, same beam count
+    (BEAM_WIDTH, over the whole query); only the constraints differ. Stops at
+    EOS, which the fine-tune appends to every training target."""
     prompt = f"Question: {question}\nSPARQL:\n"
     enc = tokenizer(prompt, add_special_tokens=False, return_tensors="pt").to(DEVICE)
     out = model.generate(
@@ -815,15 +667,10 @@ def generate_unconstrained(question, max_new_tokens=160):
 
 
 def generate_grammar_only(question):
-    """Generate a SPARQL query for a natural-language question using the
-    grammar alone -- no entity tries and no ontological boosts. The opening is
-    one of the five beginning templates; entity slots accept any well-formed
-    IRI or variable on shape alone -- the predicate slot included, since three
-    IRIs in a row is valid SPARQL -- and the query chains triples on ' .' until
-    it closes with ' }'.
-
-    The grammar-only rung of the ablation ladder: same model, same whole-query
-    beam search as the guided rungs, only the constraints differ."""
+    """Grammar alone -- no entity tries, no boosts. The opening is one of the
+    five beginning templates; entity slots accept any well-formed IRI or
+    variable on shape alone (predicate included -- three IRIs in a row is
+    valid SPARQL); triples chain on ' .' until ' }'."""
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
@@ -832,15 +679,10 @@ def generate_grammar_only(question):
 
 
 def generate_no_boosts(question):
-    """Generate a SPARQL query under the hard constraints only: the beginning
-    grammar, the merged entity trie on both entity slots, and the relation
-    whitelist -- with none of the ontological encouragement. No domain check on
-    the relation that follows an entity subject, no range check on the object.
-
-    The rung between generate_grammar_only() and the guided rungs: everything
-    that decides WHICH strings are legal is present, everything that merely
-    nudges the model towards ontologically coherent choices is gone, so the gap
-    from here to each guided rung isolates that kind of guidance."""
+    """Hard constraints only: beginning grammar, merged entity trie on both
+    entity slots, relation whitelist -- no ontological encouragement, no
+    domain check on the relation, no range check on the object. The rung
+    between generate_grammar_only() and the guided rungs."""
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
@@ -849,17 +691,14 @@ def generate_no_boosts(question):
 
 
 def generate_positive(question):
-    """Generate a SPARQL query for a natural-language question under the hard
-    constraints -- the beginning grammar, the merged entity trie on both entity
-    slots, the relation grammar -- with positive ontological guidance: relations
-    whose domains the subject's types cover, and objects inside the relation's
-    effective range, are boosted, and whatever falls outside them is charged.
+    """Hard constraints plus positive ontological guidance: relations whose
+    domains the subject's types cover, and objects inside the relation's
+    effective range, are boosted; what falls outside is charged.
 
-    Searched as one whole-query beam of BEAM_WIDTH rather than slot by slot, so
-    an opening template or a subject entity can still be revised once the rest
-    of the triple turns out implausible. Scoring sums log-probs renormalised
-    over the legal tokens and subtracts one flat penalty per incompatible slot;
-    see whole_query_beam() and Hyp for why."""
+    One whole-query beam of BEAM_WIDTH rather than slot by slot, so an opening
+    template or subject entity can still be revised once the rest of the
+    triple turns out implausible. See whole_query_beam() and Hyp for scoring.
+    """
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
@@ -868,11 +707,11 @@ def generate_positive(question):
 
 
 def generate_negative(question):
-    """The same hard constraints with negative ontological guidance: relations
-    whose effective domain is disjoint with the subject's types, and objects
-    whose class is disjoint with the relation's effective range, are suppressed
-    on the tokens that commit to them and charged once. Nothing is held against
-    a choice for want of type evidence."""
+    """Hard constraints plus negative guidance: relations whose effective
+    domain is disjoint with the subject's types, and objects whose class
+    clashes with the relation's effective range, are suppressed on the
+    deciding tokens and charged once. Nothing is held against a choice for
+    want of type evidence."""
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(
@@ -881,9 +720,9 @@ def generate_negative(question):
 
 
 def generate_both(question):
-    """The same hard constraints with both kinds of guidance at once: compatible
-    continuations boosted, clashing ones suppressed, and the charges added, so an
-    uncovered choice pays once and a provably disjoint one twice."""
+    """Both kinds of guidance at once: compatible continuations boosted,
+    clashing ones suppressed, charges added -- an uncovered choice pays once,
+    a provably disjoint one twice."""
     prompt = f"Question: {question}\nSPARQL:\n"
     ids = tokenizer(prompt, add_special_tokens=False).input_ids
     return whole_query_beam(

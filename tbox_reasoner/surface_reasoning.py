@@ -4,51 +4,14 @@ All URIs are written as bracketed IRIs (``<http://...>``), matching the SPARQL
 surface form used downstream.
 
 Every property-related calculation is restricted to the LC-QuAD predicate
-whitelist (``lcquad_data/predicates.txt``) -- the only predicates that can
-appear in LC-QuAD queries. Class calculations (subsumption, disjointness,
-equivalence) are unrestricted.
+whitelist (``lcquad_data/predicates.txt``); class calculations (subsumption,
+disjointness, equivalence) are unrestricted.
 
-The class subsumption dictionary maps each parent class URI to all of its
-descendant child class URIs via ``rdfs:subClassOf``. Descendants include direct
-children, grandchildren, and deeper subclasses.
-
-The equivalent class groups list contains URI groups connected by
-``owl:equivalentClass``.
-
-The classes list contains every class URI in the ontology: classes declared
-with ``rdf:type owl:Class``, every class participating in
-``rdfs:subClassOf`` links, and same-namespace ``owl:equivalentClass`` aliases
-(e.g. Location, declared solely as the equivalent of Place). Unlike the
-subsumption dictionary (whose keys are parents only), leaf, root, and alias
-classes are included too.
-
-The property subsumption dictionary maps each whitelisted parent property URI
-to all of its whitelisted descendant child property URIs via
-``rdfs:subPropertyOf``. Expansion runs over the full graph, so paths may pass
-through non-whitelisted intermediates, but only whitelisted properties appear
-as keys and descendants.
-
-The disjoint class dictionary maps each class URI to class URIs it is disjoint
-with via ``owl:disjointWith``. It is expanded symmetrically and through subclass
-descendants for faster lookup.
-
-The effective property domain dictionary maps each whitelisted property URI to
-every subject class URI declared for it via ``rdfs:domain``, accumulated
-conjunctively across its whole ``rdfs:subPropertyOf`` ancestry (ancestors are
-walked whether or not they are whitelisted -- their domains still apply): an
-entity is legal for the property only if every listed domain is covered by its
-direct type or transitive types. Properties with no domain anywhere up the
-ancestor chain fall back to ``owl:Thing``. This covers every raw infobox
-(``dbpedia.org/property/``) predicate, which the OWL T-box does not define at
-all, so infobox predicates are unconstrained in both slots.
-
-The effective property range dictionary maps each whitelisted property URI to
-every object class or datatype URI declared for it via ``rdfs:range``,
-accumulated conjunctively across its whole ``rdfs:subPropertyOf`` ancestry
-(ancestors are walked whether or not they are whitelisted): an entity is legal
-for the property's object slot only if every listed range is covered by its
-direct type or transitive types. Properties with no range anywhere up the
-ancestor chain fall back to ``owl:Thing``.
+Effective property domains/ranges accumulate conjunctively over the whole
+``rdfs:subPropertyOf`` ancestry (ancestors are walked even if not whitelisted);
+properties with no declared domain/range fall back to ``owl:Thing``. Raw
+infobox (``dbpedia.org/property/``) predicates are not defined in the OWL
+T-box, so they end up unconstrained in both slots.
 """
 
 from __future__ import annotations
@@ -62,13 +25,10 @@ from rdflib import Graph, URIRef
 from rdflib.namespace import OWL, RDF, RDFS
 
 
-# Path to the DBpedia ontology OWL file to read.
 DBPEDIA_OWL_FILE = Path(__file__).with_name("dbpedia_2016-04.owl")
-# Path to the LC-QuAD predicate whitelist: one bare IRI per line. Only these
-# predicates can appear in LC-QuAD queries, so all property calculations are
-# restricted to them.
+# one bare IRI per line; only predicates that can appear in LC-QuAD queries
 PREDICATE_WHITELIST_FILE = Path(__file__).parent.parent / "lcquad_data" / "predicates.txt"
-# Where to write the extracted relations as JSON. Set to None to print to stdout.
+# None = print to stdout
 OUTPUT_FILE = Path(__file__).with_name("tbox_rules.json")
 # Fallback domain/range for properties with no declared class.
 OWL_THING = f"<{OWL.Thing}>"
@@ -87,8 +47,8 @@ def load_predicate_whitelist(
 ) -> list[str]:
     """Load the LC-QuAD predicate whitelist as sorted bracketed IRIs.
 
-    The file holds one bare IRI per line with trailing commas; blank lines
-    and junk lines (anything not starting with ``http``) are skipped.
+    One bare IRI per line with trailing commas; lines not starting with
+    ``http`` are skipped.
     """
     predicates: set[str] = set()
     for line in Path(whitelist_file).read_text(encoding="utf-8").splitlines():
@@ -185,9 +145,8 @@ def extract_property_subsumptions_from_graph(
 ) -> dict[str, list[str]]:
     """Extract recursive property subsumptions, restricted to the whitelist.
 
-    Expansion runs over the full graph (paths may pass through
-    non-whitelisted intermediates); only whitelisted properties appear as
-    keys and descendants.
+    Expansion runs over the full graph, so paths may pass through
+    non-whitelisted intermediates.
     """
     keep = set(whitelist)
     direct_subproperties = extract_direct_subproperty_map_from_graph(graph)
@@ -221,26 +180,21 @@ def extract_property_domain_map_from_graph(
 ) -> dict[str, list[str]]:
     """Extract the effective ``rdfs:domain`` classes per whitelisted property.
 
-    Every domain declared on the property or on any of its
-    ``rdfs:subPropertyOf`` ancestors applies conjunctively, so all of them are
-    accumulated: an entity is legal for the property only if every listed
-    domain is covered by its direct type or transitive types. Ancestors are
-    walked whether or not they are whitelisted -- their domains still apply.
-    Properties with no domain anywhere up the ancestor chain fall back to
-    ``owl:Thing``.
+    Domains accumulate conjunctively over the whole ``rdfs:subPropertyOf``
+    ancestry (ancestors walked even if not whitelisted); no domain anywhere
+    up the chain falls back to ``owl:Thing``.
     """
     direct_property_domains = extract_direct_property_domain_map_from_graph(graph)
     property_uris = set(property_uris)
 
-    # child -> direct parent properties, for walking the subPropertyOf chain upward
+    # child -> direct parents, for walking the subPropertyOf chain upward
     parent_properties: dict[str, set[str]] = defaultdict(set)
     for parent_uri, child_uris in extract_direct_subproperty_map_from_graph(graph).items():
         for child_uri in child_uris:
             parent_properties[child_uri].add(parent_uri)
 
     def effective_domain(property_uri: str) -> set[str]:
-        # breadth-first walk accumulating every domain declared on the property
-        # or any transitive ancestor; all apply as conjunctive constraints
+        # BFS over the ancestor chain; all accumulated domains apply conjunctively
         visited = {property_uri}
         queue = [property_uri]
         domains: set[str] = set()
@@ -283,26 +237,21 @@ def extract_property_range_map_from_graph(
 ) -> dict[str, list[str]]:
     """Extract the effective ``rdfs:range`` classes per whitelisted property.
 
-    Every range declared on the property or on any of its
-    ``rdfs:subPropertyOf`` ancestors applies conjunctively, so all of them are
-    accumulated: an entity is legal for the property's object slot only if
-    every listed range is covered by its direct type or transitive types.
-    Ancestors are walked whether or not they are whitelisted -- their ranges
-    still apply. Properties with no range anywhere up the ancestor chain fall
-    back to ``owl:Thing``.
+    Ranges accumulate conjunctively over the whole ``rdfs:subPropertyOf``
+    ancestry (ancestors walked even if not whitelisted); no range anywhere
+    up the chain falls back to ``owl:Thing``.
     """
     direct_property_ranges = extract_direct_property_range_map_from_graph(graph)
     property_uris = set(property_uris)
 
-    # child -> direct parent properties, for walking the subPropertyOf chain upward
+    # child -> direct parents, for walking the subPropertyOf chain upward
     parent_properties: dict[str, set[str]] = defaultdict(set)
     for parent_uri, child_uris in extract_direct_subproperty_map_from_graph(graph).items():
         for child_uri in child_uris:
             parent_properties[child_uri].add(parent_uri)
 
     def effective_range(property_uri: str) -> set[str]:
-        # breadth-first walk accumulating every range declared on the property
-        # or any transitive ancestor; all apply as conjunctive constraints
+        # BFS over the ancestor chain; all accumulated ranges apply conjunctively
         visited = {property_uri}
         queue = [property_uri]
         ranges: set[str] = set()
@@ -419,13 +368,10 @@ def extract_equivalent_class_groups_from_graph(graph: Graph) -> list[list[str]]:
 def extract_classes_from_graph(graph: Graph) -> list[str]:
     """Return every class URI in the ontology as sorted bracketed IRIs.
 
-    Covers classes declared with ``rdf:type owl:Class``, every class
-    participating in ``rdfs:subClassOf`` links, and same-namespace
-    ``owl:equivalentClass`` aliases (e.g. Location, which is declared solely
-    as the equivalent of Place) -- so leaf, root, and alias classes that
-    never appear in the subsumption dictionary are included too. External
-    equivalents (schema.org, wikidata, ...) are not classes of this ontology
-    and are excluded.
+    Covers ``rdf:type owl:Class`` declarations, ``rdfs:subClassOf``
+    participants, and same-namespace ``owl:equivalentClass`` aliases (e.g.
+    Location, declared solely as the equivalent of Place). External
+    equivalents (schema.org, wikidata, ...) are excluded.
     """
     classes: set[str] = set()
     for class_uri in graph.subjects(RDF.type, OWL.Class):

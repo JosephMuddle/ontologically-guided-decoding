@@ -10,15 +10,13 @@ load_dotenv()
 
 DATA_PATH = os.getenv("DATA_PATH")
 RDF_TYPE = "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>"
-# assigned to entities with no direct type record, so untyped entities are
-# bucketed (and trie'd) under owl:Thing instead of being dropped
+# untyped entities get owl:Thing so they're bucketed, not dropped
 OWL_THING = "<http://www.w3.org/2002/07/owl#Thing>"
 
 
 def keep_type(iri):
-    # Keep all DBpedia type info (including owl:Thing); only strip out
-    # schema.org and wikidata. The dbo "Wikidata:Qxxxx" classes are wikidata
-    # concepts mirrored into the dbo namespace, so they're excluded too.
+    # strip schema.org/wikidata types; dbo "Wikidata:Qxxxx" classes are
+    # wikidata concepts mirrored into dbo, so exclude those too
     if "schema.org" in iri:
         return False
     if "wikidata.org" in iri:
@@ -79,10 +77,8 @@ def main():
             )
             info["transitive_types"].append(type_iri)
 
-    # entities with no direct type record (they appear only in the transitive
-    # file) get owl:Thing assigned before export: this keeps them in
-    # class_entities below -- and hence in the owl:Thing class trie and the
-    # merged all-entities trie -- instead of dropping them entirely
+    # entities found only in the transitive file get owl:Thing, so they land in
+    # class_entities -- and hence the owl:Thing and all-entities tries
     for info in entities.values():
         if info["type"] is None:
             info["type"] = OWL_THING
@@ -91,8 +87,7 @@ def main():
     with open(out_path, "wb") as f:
         pickle.dump(entities, f)
 
-    # inverted index: each class -> all entities whose (final) direct type is
-    # that class; consumed to build per-class token tries without a full scan
+    # class -> entities of that direct type; used to build per-class tries
     class_entities = dict()
     for head_iri, info in entities.items():
         if info["type"] is not None:

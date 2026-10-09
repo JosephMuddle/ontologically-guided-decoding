@@ -2,25 +2,15 @@
 
 For every test question, generate a SPARQL query with the type-constrained
 generator, canonicalize both the produced query and the gold query, and count
-exact string matches. Two metrics are reported: strict exact match, and match
-"modulo namespace twins", where predicates whitelisted in both the ontology/
-and property/ namespaces (e.g. architect) are compared namespace-neutrally.
-Every question is decoded once per rung of the ablation ladder -- the hard
-constraints under each of three kinds of ontological guidance (positive
-domain/range coverage, negative class disjointness, and both at once), the same
-hard constraints with no guidance, structure-only, and the raw fine-tuned weights
-with no constraints at all -- so one run produces every column the comparison
-needs. output.json carries the gold query and all six outputs, canonical form
-only: canonicalisation is whitespace-level and loses nothing the evaluation
-uses, and keeping one spelling per query stops the raw and canonical copies
-drifting apart. Records are rewritten every CHECKPOINT questions so a crash does
-not lose the run, and re-read on startup: a run cut short by a Colab timeout
-resumes at the question after the last record instead of starting over.
---systems narrows the run to particular rungs and --redo clears them first, so
-one rung can be regenerated in place after a decoder change without touching
-the others. Delete output.json to start over. Files written before the guidance
-rungs were split hold the positive rung under its old name, "generated"; it is
-renamed on load, so an old run gains the new rungs with --systems negative both.
+exact string matches. Two metrics: strict exact match, and match "modulo
+namespace twins", where predicates whitelisted in both the ontology/ and
+property/ namespaces (e.g. architect) are compared namespace-neutrally.
+Every question is decoded once per rung of the ablation ladder, so one run
+produces every column the comparison needs. output.json carries the gold query
+and all six outputs in canonical form only. Records are rewritten every
+CHECKPOINT questions and re-read on startup, so a cut-short run resumes where
+it stopped. --systems narrows the run to particular rungs, --redo clears them
+first. Delete output.json to start over.
 """
 import argparse
 import json
@@ -29,9 +19,9 @@ import re
 import time
 from pathlib import Path
 
-# --beams is parsed before the generation module is imported, because that
-# module reads BEAM_WIDTH from the environment at import time -- and importing
-# it loads the 3 GB checkpoint, which --help should not have to wait for
+# parse --beams before importing the generation module: it reads BEAM_WIDTH
+# at import time, and importing it loads the 3 GB checkpoint -- --help should
+# not have to wait for that
 ARGS = None
 if __name__ == "__main__":
     _ap = argparse.ArgumentParser(description="LC-QuAD test-split evaluation.")
@@ -59,11 +49,7 @@ WHITELIST_FILE = Path(__file__).parent / "lcquad_data" / "predicates.txt"
 OUT_FILE = Path(__file__).parent / "output.json"
 CHECKPOINT = 10  # questions between progress prints / output.json rewrites
 
-# The ablation ladder, guided rungs first. Each entry is (record prefix,
-# decoder). Each guided rung minus no_boosts isolates one kind of ontological
-# guidance -- positive domain/range coverage, negative class disjointness, or
-# both together -- and no_boosts minus grammar_only isolates the KB vocabulary
-# (entity tries + relation whitelist) from bare structure.
+# the ablation ladder, guided rungs first; each entry is (record prefix, decoder)
 SYSTEMS = (
     ("positive", generate_positive),
     ("negative", generate_negative),
@@ -76,9 +62,8 @@ SYSTEMS = (
 
 def canonicalize(q):
     # _scratch_trie.canonicalize plus one extra step: drop a trailing dot
-    # before the closing brace. Legal SPARQL and present in ~28% of gold
-    # queries, but the generator's grammar can never emit it, so without
-    # this those queries could never exact-match.
+    # before the closing brace -- legal SPARQL, present in ~28% of gold
+    # queries, but the generator's grammar can never emit it
     q = " ".join(q.split())
     q = q.replace("COUNT( ?uri )", "COUNT(?uri)")
     q = q.replace("{", "{ ").replace("}", " }")
@@ -88,7 +73,7 @@ def canonicalize(q):
 
 def _load_twin_names():
     # predicate local-names whitelisted in BOTH the ontology/ and property/
-    # namespaces -- the pairs a strict exact match cannot tell apart
+    # namespaces -- pairs a strict exact match cannot tell apart
     ont, prop = set(), set()
     for line in WHITELIST_FILE.read_text(encoding="utf-8").splitlines():
         iri = line.strip().rstrip(",")
@@ -107,16 +92,15 @@ TWIN_RE = re.compile(
 
 
 def canonicalize_twins(q):
-    # canonicalize, then rewrite every twin predicate to a namespace-neutral
-    # IRI, so gold <.../property/architect> and generated <.../ontology/architect>
-    # compare equal. Generation itself is unaffected.
+    # rewrite twin predicates to a namespace-neutral IRI so gold
+    # <.../property/architect> and generated <.../ontology/architect> compare
+    # equal; generation itself is unaffected
     return TWIN_RE.sub(r"<dbpedia-twin/\1>", canonicalize(q))
 
 
 def report(results):
-    """Match rates per rung over whatever the file currently holds. Each rung is
-    counted over the records that actually have it, so the line stays honest
-    when only some rungs have been run."""
+    """Match rates per rung over whatever the file currently holds; each rung is
+    counted only over records that have it."""
     parts = []
     for name, _ in SYSTEMS:
         have = [r for r in results if f"{name}_match" in r]
@@ -140,20 +124,18 @@ def main():
     assert not unknown, f"unknown rung(s) {unknown}; pick from {names}"
     run_systems = [(n, d) for n, d in SYSTEMS if n in chosen]
 
-    # Resume: whatever is already in output.json stands. A record is finished
-    # when it holds an answer for every rung being run, so re-running one rung
-    # over a complete file needs --redo to clear that rung first.
+    # resume: whatever is already in output.json stands; re-running one rung
+    # over a complete file needs --redo to clear that rung first
     results = json.loads(OUT_FILE.read_text(encoding="utf-8")) if OUT_FILE.exists() else []
     if results:
-        # a mismatch means this output.json belongs to a different dataset or a
-        # reordered one; continuing would silently interleave two runs
+        # a mismatch means this output.json belongs to a different or reordered
+        # dataset; continuing would silently interleave two runs
         last = min(len(results), len(data))
         assert results[last - 1]["question"] == data[last - 1]["corrected_question"], (
             f"{OUT_FILE.name} does not line up with {DATA_FILE.name} at record {last}"
         )
 
-    # files from before the guidance rungs were split hold the positive rung as
-    # "generated": the same rung under its old name, so rename it rather than rerun
+    # old files hold the positive rung under the name "generated": rename, don't rerun
     renamed = 0
     for rec in results:
         if "generated_canonical" in rec and "positive_canonical" not in rec:
@@ -193,7 +175,7 @@ def main():
         gold_c = record["gold_canonical"]
         for name, decode in run_systems:
             if f"{name}_canonical" in record:
-                continue  # kept from an earlier run
+                continue  # already stored from an earlier run
             try:
                 produced = decode(record["question"])
             except Exception as e:  # one bad question must not kill a long run
@@ -202,8 +184,8 @@ def main():
             record[f"{name}_canonical"] = produced_c
             record[f"{name}_match"] = produced_c == gold_c
             if name == "positive":
-                # the twin-neutral variant is recorded for one rung only, the one it
-                # has always been recorded for; the eval notebook recomputes it for all
+                # twin-neutral match is stored on this rung only; the eval
+                # notebook recomputes it for all rungs
                 record["match_modulo_twins"] = (canonicalize_twins(produced)
                                                 == canonicalize_twins(item["sparql_query"]))
         if k % CHECKPOINT == 0:

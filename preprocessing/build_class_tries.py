@@ -1,17 +1,13 @@
-"""Precompute per-class token tries and pickle them to dbpedia/class_tries.pkl.
+"""Precompute per-class token tries -> dbpedia/class_tries.pkl.
 
-Inputs: dbpedia/class_entities.json (written by extract_entities.py) and
+Inputs: dbpedia/class_entities.json (from extract_entities.py),
         tbox_reasoner/tbox_rules.json (class_subsumptions + effective ranges)
-Output: dbpedia/class_tries.pkl -- {class_iri: dict-of-dicts trie over Qwen
-        token ids}, with variables ?uri/?x inserted into every trie (object
-        slots may be variables) and None as the terminal marker key, plus a
-        merged all-entities trie under the reserved key "__ALL__" (walked for
-        the subject slot, where any entity is legal). Every
-        class reachable from the tbox (subsumption parents/descendants, range
-        values) is present; classes without entities share one variables-only
-        trie, so the runtime never has to build a trie itself.
+Output: {class_iri: trie over Qwen token ids} with ?uri/?x in every trie,
+        None as terminal key, merged all-entities trie under "__ALL__"
+        (subject slot, any entity legal). Every tbox-reachable class is
+        present; entity-less classes share one variables-only trie.
 
-The tries are tokenizer-dependent: rebuild this file if the model changes.
+Tokenizer-dependent -- rebuild if the model changes.
 """
 
 import json
@@ -43,9 +39,8 @@ def build_trie(strings):
 
 
 def merge_tries(a, b):
-    """Union trie b into trie a without mutating b: shared subtrees are
-    copied along the merged path (copy-on-write), so the per-class tries
-    stay intact. Terminal markers (TRIE_END) are just keys."""
+    """Union trie b into a without mutating b (copy-on-write along shared
+    paths, so per-class tries stay intact)."""
     for k, v in b.items():
         if k in a and isinstance(v, dict) and isinstance(a[k], dict):
             a[k] = dict(a[k])
@@ -69,9 +64,8 @@ def main():
                   f"{total_entities:,} entities, {time.time() - start:.0f}s",
                   flush=True)
 
-    # every class the runtime can ask for must be present: classes mentioned
-    # in the tbox but having no entities share one variables-only trie
-    # (single shared object -- pickle stores it once; tries are never mutated)
+    # tbox classes with no entities share one variables-only trie
+    # (single shared object -- pickled once; tries are never mutated)
     tbox = json.loads(
         (DATA_DIR.parent / "tbox_reasoner" / "tbox_rules.json").read_text(encoding="utf-8")
     )
@@ -86,8 +80,8 @@ def main():
     for class_iri in missing:
         tries[class_iri] = vars_trie
 
-    # one merged trie over every entity (+ variables, present in each class
-    # trie): the subject slot accepts any entity, so it walks this trie
+    # merged trie over every entity (+ variables, already in each class trie);
+    # the subject slot accepts any entity, so it walks this one
     all_trie = {}
     for class_iri in sorted(tries):
         merge_tries(all_trie, tries[class_iri])
