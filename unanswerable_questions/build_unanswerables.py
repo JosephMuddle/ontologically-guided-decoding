@@ -59,26 +59,25 @@ def sparql(query):
 
 
 def is_entity(term):
+    #/resource/ is entities
     return term.startswith("<") and "/resource/" in term
 
 
 def entity_name(iri):
-    """<.../resource/John_Fanning_(businessman)> -> "John Fanning (businessman)"."""
+    """normalise the names"""
     local = urllib.parse.unquote(iri[1:-1].split("/resource/", 1)[1])
     return " ".join(local.replace("_", " ").split())
 
 
 def ascii_fold(text):
-    """LC-QuAD questions drop non-ASCII: Trần_Việt_Hương -> "Trn Vit Hng".
-    Case-folded, single-spaced for comparison."""
+    """LC-QuAD questions drop non-ASCII"""
     return " ".join(text.encode("ascii", "ignore").decode().split()).lower()
 
 
 def locate_subject(question, subject):
     """(start, end) of the subject's mention in the question, or None.
 
-    <...> span when bracketed, bare text otherwise (template 2 leaves the
-    entity unbracketed). No match -> sample is skipped."""
+    No match -> sample is skipped."""
     if not is_entity(subject):
         return None
     name = ascii_fold(entity_name(subject))
@@ -90,7 +89,7 @@ def locate_subject(question, subject):
 
 
 def rewrite(question, span, new_subject):
-    """Step 3: swap in the new entity's name; drop the remaining angle brackets."""
+    """Step 3: swap in the new entity's name"""
     a, b = span
     return (question[:a] + entity_name(new_subject) + question[b:]).replace("<", "").replace(">", "")
 
@@ -145,15 +144,14 @@ def main():
 
     def admissible(old, new):
         """T-box test: differs from old subject and object, and falls in an
-        explicit domain -- a class other than owl:Thing."""
+        explicit domain (a class other than owl:Thing)"""
         s, p, o = new
         return (s != old[0] and s != o
                 and any(c != OWL_THING for c in DOMAIN[p])
                 and domain_covered(p, s))
 
     def has_triples(s, p, o):
-        """Asked under both ontology/ and property/ spellings of the predicate
-        -- the rewritten question cannot tell them apart."""
+        """dbo and dbp have a lot of duplication, this is for the mod_twins bit"""
         local = p[1:-1].rsplit("/", 1)[1]
         twins = " ".join(f"<http://dbpedia.org/{ns}/{local}>" for ns in ("ontology", "property"))
         return sparql(f"ASK {{ VALUES ?p {{ {twins} }} {s} ?p {o} }}")["boolean"]
