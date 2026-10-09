@@ -350,29 +350,18 @@ class Hyp:
     """One whole-query hypothesis: tokens so far, summed log-prob, and the
     constraint state that decides what may legally come next.
 
-    Score = log-probs renormalised over the legal tokens, less one flat
-    penalty per incompatible slot; no length normalisation, so a forced token
-    costs ~nothing.
+    Score = log-probs renormalised over the legal tokens.
 
     Boosts only steer which continuations get expanded (legal_logits returns
     a separate ranking tensor); the score settles once per slot in advance():
     BOOST off a relation whose domain the subject's types don't cover, BOOST
-    off an object that ends outside the range. Charged against the
-    incompatible, a score only falls -- which is what lets the search retire a
-    hypothesis the moment it drops below a finished one. The residual length
-    coupling is explicit: more triples means more slots that can each be wrong
-    once.
-
-    Don't score the unmasked distribution instead: the tighter the rung, the
+    off an object that ends outside the range. The tighter the rung, the
     more often the model is pushed onto tokens it rates poorly, so closing the
-    query early becomes the cheapest exit. Measured on a 50-question run: 30
-    one-triple queries against gold's 10, never more triples than gold. Scores
-    are only ever compared within one decode, never across rungs, so
-    renormalising costs nothing.
+    query early becomes the cheapest exit. Renormalise instead to not have length
+    bias
 
     Hypotheses are copied on every branch. Trie nodes are read-only shared
-    dicts; xgrammar matchers are stateful, so never stored -- rebuilt from
-    slot_ids on demand.
+    dicts; xgrammar matchers are stateful, so never stored.
     """
     ids: list                 # prompt + generated tokens
     gen: list                 # generated tokens only -- the query

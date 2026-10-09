@@ -5,7 +5,8 @@ The idea of this is to use an ontology as a guide for type-correct decoding of s
 
 Everything needed for the constrained-decoding pipeline. (The SPARQL-endpoint
 execution evaluation is a separate, optional side project and is not covered
-here.)
+here.) NOTE: in order to build unanswerable questions, the fuseki DBPedia server
+needs to be active. This is in the evaluations and results/dbpedia_endpoint_local.ipynb notebook
 
 Prerequisites already in the repo:
 - `tbox_reasoner/dbpedia_2016-04.owl` -- DBpedia 2016-04 ontology

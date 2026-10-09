@@ -1,11 +1,9 @@
-"""Counterfactual 1-hop questions from LC-QuAD (technical_description.md).
+"""Counterfactual 1-hop questions from LC-QuAD
 
 Step 1  regex-select test queries whose WHERE holds exactly one triple
         -> "lcquad 1 hop.json".
 Step 2  swap the subject for another test-data entity in the predicate's
         domain; keep it only if the local endpoint holds no triple for it.
-        In file order until 100 counterfactuals. A sample whose subject is
-        the answer variable has nothing to swap.
 Step 3  rewrite the subject's mention in intermediary_question with the new
         entity's name; other mentions keep their wording, brackets dropped.
 Step 4  write {question, sparql_query} pairs -> "unanswerable 1 hops.json".
