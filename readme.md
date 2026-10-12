@@ -1,5 +1,19 @@
 # Summary
-The idea of this is to use an ontology as a guide for type-correct decoding of semantic parsing of SPARQL queries. We use the DBPedia knowledge graph, as it has the best t-box a-box separation of knowledge graphs. We test on the LCQuad 1.0 dataset, as its questions are entirely DBPedia questions. Our approach allows users to ask questions which do not have answers in the knowledge graph, while using the ontology of the knowledge graph as a way to help understand the user's questions. This is potentially less computationally intensive than many of the entity-linking based approaches in KGQA, as we do not need to embed or search the knowledge graph for relevant entities, we only need to know how to construct a query. 
+We use a TBox and type declarations to encourage type-correct SPARQL query generation from a large language model. We intervene at the decoding phase by increasing and decreasing the probability of specific tokens being selected based on the probability that they continue a TBox-compatible query output of the model. We test on the DBPedia knowledge graph and the LCQuAD 1.0 dataset. Our model does not require subgraph entity retrieval in order to construct the SPARQL query. Our model therefore allows the user to ask questions which have empty answer sets in the graph, without altering the semantic meaning of the SPARQL query.
+
+# Repo structure
+- `type_constrained_generation.py` -- the decoder: grammar constraints plus ontology-guided beam search
+- `test.py` -- generates queries for the LC-QuAD test split at each constraint level
+- `tbox_reasoner/` -- extracts domains, ranges, subclass and disjointness rules from the DBpedia ontology
+- `lcquad_data/` -- LC-QuAD v1 splits and the predicate whitelist
+- `preprocessing/` -- builds the entity tries from the DBpedia instance-type dumps
+- `evaluations and results/` -- beam-width sweep results; notebooks for the constraint ablation and for executing generated queries against a local Apache Jena Fuseki endpoint
+- `unanswerable_questions/` -- builds counterfactual and empty-answer-set questions; notebook comparing our decoder with SPARKLE on them
+- `fine_tuning/` -- Colab notebook that produces the fine-tuned weights
+- `dbpedia/`, `model/` -- generated artifacts and weights, not committed
+
+
+
 
 # Clean repo run order
 
@@ -17,15 +31,17 @@ Prerequisites to fetch:
 - The two instance-type dumps, placed in `dbpedia/`:
   [instance_types_en.ttl.bz2](https://downloads.dbpedia.org/2016-04/core-i18n/en/instance_types_en.ttl.bz2)
   and [instance_types_transitive_en.ttl.bz2](https://downloads.dbpedia.org/2016-04/core-i18n/en/instance_types_transitive_en.ttl.bz2)
-- The merged Qwen checkpoint directory, placed at
-   `model/qwen25-coder-1.5b-lcquad` (or configure `MODEL_PATH` in `.env`).
-   To train your own, run `fine_tuning/fine_tune_qwen.ipynb` on Colab.
+- The fine-tuned weights file, placed at `model/qwen_lcquad.safetensors`
+  (or configure `MODEL_WEIGHTS` in `.env`). It holds only the weights; the
+  config and tokenizer come from the public base model `Qwen/Qwen2.5-Coder-1.5B`.
+  To train your own, run `fine_tuning/fine_tune_qwen.ipynb` on Colab.
 - A `.env` file in the project root:
   ```
   DATA_PATH=dbpedia
-   MODEL_PATH=model/qwen25-coder-1.5b-lcquad
+  MODEL_WEIGHTS=model/qwen_lcquad.safetensors
   ```
-   (`MODEL_PATH` is optional; the path above is the default.)
+   (Both are optional; the paths above are the defaults. `MODEL_ID` overrides
+   the base model the weights are loaded into.)
 
 Python deps: `pip install torch transformers xgrammar safetensors rdflib python-dotenv`
 
@@ -46,7 +62,7 @@ Run the pipeline in this order:
      `Qwen/Qwen2.5-Coder-1.5B` and can be overridden with `TRIE_MODEL_ID`.
 
 4. `python type_constrained_generation.py`
-   - Loads the merged Qwen model, t-box rules, and class tries, then generates a query for one built-in question as a smoke test.
+   - Loads the fine-tuned weights onto the base model, with the t-box rules and class tries, then generates a query for one built-in question as a smoke test.
 
 5. `python test.py`
    - Generates queries for all 1000 LC-QuAD test questions.
