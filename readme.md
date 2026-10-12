@@ -10,10 +10,7 @@ We use a TBox and type declarations to encourage type-correct SPARQL query gener
 - `evaluations and results/` -- beam-width sweep results; notebooks for the constraint ablation and for executing generated queries against a local Apache Jena Fuseki endpoint
 - `unanswerable_questions/` -- builds counterfactual and empty-answer-set questions; notebook comparing our decoder with SPARKLE on them
 - `fine_tuning/` -- Colab notebook that produces the fine-tuned weights
-- `dbpedia/`, `model/` -- generated artifacts and weights, not committed
-
-
-
+- `dbpedia/`, `model/` -- generated artifacts and weights, not included in repo
 
 # Clean repo run order
 
@@ -47,23 +44,28 @@ Python deps: `pip install torch transformers xgrammar safetensors rdflib python-
 
 Run the pipeline in this order:
 
-1. `python tbox_reasoner/surface_reasoning.py`
+1. Fine-tune the model -- `fine_tuning/fine_tune_qwen.ipynb` on Colab.
+   - Trains the base model on the LC-QuAD train split and writes
+     `model/qwen_lcquad.safetensors`.
+   - Skip if you already have the weights file.
+
+2. `python tbox_reasoner/surface_reasoning.py`
    - Reads the OWL T-box and `lcquad_data/predicates.txt`.
    - Writes `tbox_reasoner/tbox_rules.json` (already committed; rerun only if the ontology or the whitelist changes).
 
-2. `python preprocessing/extract_entities.py`
+3. `python preprocessing/extract_entities.py`
    - Reads the two `instance_types*.ttl.bz2` dumps from `DATA_PATH`.
    - Writes `dbpedia/entities.pkl` and `dbpedia/class_entities.json`.
 
-3. `python preprocessing/build_class_tries.py`
+4. `python preprocessing/build_class_tries.py`
    - Reads `dbpedia/class_entities.json` and `tbox_reasoner/tbox_rules.json`.
    - Writes `dbpedia/class_tries.pkl`.
    - Rebuild this whenever the tokenizer/model changes; it defaults to
      `Qwen/Qwen2.5-Coder-1.5B` and can be overridden with `TRIE_MODEL_ID`.
 
-4. `python type_constrained_generation.py`
+5. `python type_constrained_generation.py`
    - Loads the fine-tuned weights onto the base model, with the t-box rules and class tries, then generates a query for one built-in question as a smoke test.
 
-5. `python test.py`
+6. `python test.py`
    - Generates queries for all 1000 LC-QuAD test questions.
    - Writes `output.json` (rewritten every 10 questions) and prints exact-match and modulo-namespace-twins accuracy.
