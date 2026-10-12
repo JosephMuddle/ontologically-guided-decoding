@@ -1,5 +1,5 @@
 # Summary
-We use a TBox and type declarations to encourage type-correct SPARQL query generation from a large language model. We intervene at the decoding phase by increasing and decreasing the probability of specific tokens being selected based on the probability that they continue a TBox-compatible query output of the model. We test on the DBPedia knowledge graph and the LCQuAD 1.0 dataset. Our model does not require subgraph entity retrieval in order to construct the SPARQL query. Our model therefore allows the user to ask questions which have empty answer sets in the graph, without altering the semantic meaning of the SPARQL query.
+We use a TBox and type declarations to encourage type-correct SPARQL query generation from large language models. At decoding time, we up-weight or down-weight token probabilities according to how likely each token is to continue a TBox-compatible query. We evaluate on DBpedia and the LC-QuAD 1.0 dataset. Our approach does not require subgraph entity retrieval to construct the SPARQL query. As a result, users can ask questions whose answer sets are empty in the graph without changing the semantics of the generated SPARQL query.
 
 # Repo structure
 - `type_constrained_generation.py` -- the decoder: grammar constraints plus ontology-guided beam search
