@@ -69,3 +69,17 @@ Run the pipeline in this order:
 6. `python test.py`
    - Generates queries for all 1000 LC-QuAD test questions.
    - Writes `output.json` (rewritten every 10 questions) and prints exact-match and modulo-namespace-twins accuracy.
+
+# Unanswerable questions sample dataset
+to test the unanswerable questions sample dataset created for this paper, run the files in /unanswerable_questions/ in the following order
+1. `build_unanswerables.py`
+   - Creates the lcquad 1 hop.json file, containing 1 hop non-boolean queries from LC-QuAD
+   - Creates the unanswerable 1 hops.json file, after switching the subject of 1 hop queries to another type-compatible entity
+2. (optional) remove grammatically incoherent samples from unanswerable 1 hops.json by hand as described in paper
+3. `unanswerable_vs_sparkle.ipynb`
+   - run from colab
+   - clones the SPARKLE [https://github.com/zzaebok/sparkle] repo and model checkpoints into the colab environment
+   - clones the OGD repo (this repo) into the colab environment
+   - compares the text-to-SPARQL performance of both approaches on unanswerable 1 hops.json
+   - saves outputs to unanswerable_results.json
+   - displays comparative metrics of both methods on the sample dataset.
