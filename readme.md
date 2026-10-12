@@ -8,7 +8,7 @@ We use a TBox and type declarations to encourage type-correct SPARQL query gener
 - `lcquad_data/` -- LC-QuAD v1 splits and the predicate whitelist
 - `preprocessing/` -- builds the entity tries from the DBpedia instance-type dumps
 - `evaluations and results/` -- beam-width sweep results; notebooks for the constraint ablation and for executing generated queries against a local Apache Jena Fuseki endpoint
-- `unanswerable_questions/` -- builds counterfactual and empty-answer-set questions; notebook comparing our decoder with SPARKLE on them
+- `unanswerable_questions/` -- builds empty-answer-set questions; notebook comparing our decoder with SPARKLE on them
 - `fine_tuning/` -- Colab notebook that produces the fine-tuned weights
 - `dbpedia/`, `model/` -- generated artifacts and weights, not included in repo
 
